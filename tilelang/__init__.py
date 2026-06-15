@@ -214,4 +214,9 @@ if not env.is_light_import():
     from . import rocm as rocm  # noqa: F401
     from . import metal as metal  # noqa: F401
 
+    if env.get_pass_trace_mode() is not None:
+        from .tools.pass_trace import patch as _pass_trace_patch
+
+        _pass_trace_patch()
+
 del _lazy_load_lib
