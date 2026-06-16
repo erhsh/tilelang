@@ -1,0 +1,1373 @@
+"""HTML report generation for lower trace."""
+
+from __future__ import annotations
+
+import os
+
+from .core import LowerRecord, STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED
+from .diff import _esc, _make_diff_html
+
+
+_CSS = """
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #f5f7fa;
+    color: #1e293b;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.header {
+    background: linear-gradient(135deg, #0f172a, #1e293b);
+    color: white;
+    padding: 12px 20px;
+    flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+.header h1 { font-size: 17px; font-weight: 600; }
+.header .sub { font-size: 12px; opacity: 0.6; margin-top: 2px; }
+
+.phase-tabs {
+    display: flex;
+    background: #e2e8f0;
+    border-bottom: 1px solid #cbd5e1;
+    flex-shrink: 0;
+}
+.phase-tab {
+    padding: 8px 20px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    color: #64748b;
+    border-bottom: 3px solid transparent;
+    transition: all 0.15s;
+    user-select: none;
+}
+.phase-tab:hover { background: #f1f5f9; color: #1e293b; }
+.phase-tab.active {
+    color: #2563eb;
+    border-bottom-color: #2563eb;
+    background: #f5f7fa;
+}
+
+.summary-bar {
+    background: white;
+    padding: 8px 20px;
+    border-bottom: 1px solid #e2e8f0;
+    font-size: 13px;
+    flex-shrink: 0;
+}
+.summary-bar .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 10px;
+    margin-right: 8px;
+    font-weight: 600;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+    border: 2px solid transparent;
+    user-select: none;
+}
+.summary-bar .badge:hover { filter: brightness(0.92); }
+.summary-bar .badge.active { border-color: #1e293b; box-shadow: 0 0 0 1px #1e293b; }
+.summary-bar .badge.dimmed { opacity: 0.35; }
+.badge-total   { background: #e2e8f0; color: #475569; }
+.badge-changed { background: #dcfce7; color: #166534; }
+.badge-noop    { background: #f1f5f9; color: #94a3b8; }
+.badge-failed  {
+    background: #dc2626; color: #fff;
+    font-weight: 700; font-size: 12px;
+    padding: 3px 12px;
+    animation: badgePulse 1.5s ease-in-out infinite;
+}
+.badge-skipped {
+    background: #f59e0b; color: #fff;
+    font-weight: 700; font-size: 12px;
+    padding: 3px 12px;
+}
+@keyframes badgePulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); }
+    50% { box-shadow: 0 0 0 4px rgba(220, 38, 38, 0); }
+}
+
+.main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+}
+
+.sidebar {
+    width: 270px;
+    min-width: 0;
+    background: white;
+    border-right: 1px solid #e2e8f0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 8px 0;
+    flex-shrink: 0;
+    transition: width 0.2s ease;
+    position: relative;
+}
+.sidebar.collapsed {
+    width: 0 !important;
+    padding: 0;
+    border-right: none;
+}
+.sidebar .section-title {
+    padding: 8px 14px 4px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #94a3b8;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.sidebar-resize {
+    width: 5px;
+    cursor: col-resize;
+    background: transparent;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 20;
+    margin-left: -3px;
+    margin-right: -2px;
+}
+.sidebar-resize:hover,
+.sidebar-resize.active { background: #3b82f6; }
+
+.sidebar-toggle-btn {
+    position: absolute;
+    top: 8px;
+    z-index: 30;
+    width: 28px;
+    height: 28px;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    background: white;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    transition: background 0.15s, box-shadow 0.15s;
+    user-select: none;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.sidebar-toggle-btn:hover { background: #f1f5f9; box-shadow: 0 1px 4px rgba(0,0,0,0.12); }
+
+.sidebar-toggle-btn .chevron {
+    display: block;
+    width: 7px;
+    height: 7px;
+    border-right: 2px solid #64748b;
+    border-bottom: 2px solid #64748b;
+    transition: transform 0.25s ease;
+}
+.sidebar-toggle-btn:hover .chevron { border-color: #1e293b; }
+
+.sidebar-toggle-btn.inside {
+    left: auto;
+    right: 10px;
+    box-shadow: none;
+    border-color: #e2e8f0;
+}
+.sidebar-toggle-btn.inside .chevron {
+    transform: rotate(135deg);
+    margin-left: 2px;
+}
+
+#sidebar-open-btn {
+    left: 4px;
+}
+#sidebar-open-btn .chevron {
+    transform: rotate(-45deg);
+    margin-right: 2px;
+}
+
+.pass-link {
+    display: flex;
+    align-items: center;
+    padding: 5px 14px;
+    font-size: 12.5px;
+    cursor: pointer;
+    color: #334155;
+    text-decoration: none;
+    transition: background 0.1s, opacity 0.15s;
+    gap: 7px;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+}
+.pass-link:hover { background: #f1f5f9; }
+.pass-link.active { background: #eff6ff; color: #2563eb; }
+.pass-link.filtered-out { display: none; }
+
+.pass-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.pass-dot.changed { background: #22c55e; }
+.pass-dot.noop    { background: #d1d5db; }
+.pass-dot.failed {
+    background: #dc2626;
+    width: 10px; height: 10px;
+    box-shadow: 0 0 0 2px #fecaca, 0 0 6px rgba(220,38,38,0.5);
+    animation: dotPulse 1.5s ease-in-out infinite;
+}
+.pass-dot.skipped {
+    background: transparent;
+    border: 2px solid #f59e0b;
+    width: 10px; height: 10px;
+}
+@keyframes dotPulse {
+    0%, 100% { box-shadow: 0 0 0 2px #fecaca, 0 0 6px rgba(220,38,38,0.5); }
+    50% { box-shadow: 0 0 0 4px #fecaca, 0 0 10px rgba(220,38,38,0.3); }
+}
+
+.pass-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+.pass-idx {
+    font-size: 10px;
+    color: #94a3b8;
+    flex-shrink: 0;
+    width: 18px;
+    text-align: right;
+}
+
+.pass-stats {
+    font-size: 10px;
+    flex-shrink: 0;
+    white-space: nowrap;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+}
+.pass-stats .st-add { color: #1a7f37; }
+.pass-stats .st-del { color: #cf222e; }
+
+.content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+}
+
+.pass-section {
+    display: none;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.05);
+    padding: 20px;
+    margin-bottom: 16px;
+}
+.pass-section.active { display: block; }
+.pass-section.failed-section {
+    border-left: 4px solid #dc2626;
+    background: #fffbfb;
+}
+.pass-section.skipped-section {
+    border-left: 4px solid #f59e0b;
+    background: #fffdf5;
+    opacity: 0.85;
+}
+
+.pass-section.collapsed > *:not(.pass-header) { display: none; }
+
+.pass-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #f1f5f9;
+    border-radius: 4px;
+    transition: background 0.1s;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: white;
+}
+.pass-header.collapsible { cursor: pointer; user-select: none; }
+.pass-header.collapsible:hover { background: #f8fafc; }
+
+.pass-toggle {
+    width: 16px;
+    flex-shrink: 0;
+    font-size: 10px;
+    color: #94a3b8;
+    text-align: center;
+}
+.pass-section:not(.collapsed) > .pass-header .pass-toggle::before { content: '\\25BC'; }
+.pass-section.collapsed > .pass-header .pass-toggle::before { content: '\\25B6'; }
+
+.pass-header h2 { font-size: 15px; font-weight: 600; }
+.pass-header .status {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 10px;
+    border-radius: 10px;
+    letter-spacing: 0.03em;
+    margin-left: auto;
+}
+.status-changed { background: #dcfce7; color: #166534; }
+.status-noop    { background: #f1f5f9; color: #94a3b8; }
+.status-failed {
+    background: #dc2626; color: #fff;
+    font-size: 12px; padding: 3px 14px;
+    border-radius: 10px;
+    animation: badgePulse 1.5s ease-in-out infinite;
+}
+.status-skipped {
+    background: #f59e0b; color: #fff;
+    font-size: 12px; padding: 3px 14px;
+    border-radius: 10px;
+}
+
+.error-box {
+    background: #fef2f2;
+    border: 1px solid #fca5a5;
+    border-left: 4px solid #ef4444;
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin-bottom: 14px;
+    font-size: 13px;
+    color: #991b1b;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    line-height: 1.5;
+    word-break: break-word;
+}
+.error-box .error-label {
+    font-weight: 700;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+    color: #dc2626;
+}
+
+.noop-msg {
+    color: #94a3b8;
+    font-size: 13px;
+    text-align: center;
+    padding: 16px;
+}
+
+.ir-toggle {
+    display: block;
+    margin: 10px auto 0;
+    padding: 5px 18px;
+    background: #f1f5f9;
+    border: 1px solid #e2e8f0;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 12px;
+    color: #64748b;
+    transition: background 0.1s;
+}
+.ir-toggle:hover { background: #e2e8f0; }
+
+.ir-block {
+    display: none;
+    margin-top: 10px;
+    max-height: 500px;
+    overflow: auto;
+}
+.ir-block.show { display: block; }
+
+.ir-block pre {
+    background: #ffffff;
+    color: #24292f;
+    padding: 14px;
+    border-radius: 6px;
+    border: 1px solid #d0d7de;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    line-height: 20px;
+    white-space: pre;
+    tab-size: 2;
+}
+.ir-block .ir-line {
+    display: block;
+}
+.ir-block .ir-line.hl {
+    background: #fff8c5;
+}
+.ir-block .ir-ln {
+    display: inline-block;
+    width: 50px;
+    text-align: right;
+    padding-right: 12px;
+    color: #8c959f;
+    user-select: none;
+    cursor: pointer;
+}
+.ir-block .ir-ln:hover {
+    text-decoration: underline;
+}
+
+.diff-table-wrap {
+    overflow-x: auto;
+    border-radius: 6px;
+    border: 1px solid #d0d7de;
+    background: #ffffff;
+}
+.diff-table-wrap table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 12px;
+    line-height: 20px;
+    table-layout: fixed;
+}
+.diff-table-wrap td {
+    padding: 0 10px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    vertical-align: top;
+}
+
+.diff-table-wrap .ln {
+    width: 50px;
+    min-width: 50px;
+    max-width: 50px;
+    text-align: right;
+    padding: 0 8px;
+    color: #8c959f;
+    background: #f6f8fa;
+    border-right: 1px solid #d0d7de;
+    user-select: none;
+    font-size: 11px;
+}
+
+.diff-table-wrap .sg {
+    width: 20px;
+    min-width: 20px;
+    max-width: 20px;
+    text-align: center;
+    padding: 0;
+    user-select: none;
+    font-weight: 700;
+}
+
+.diff-table-wrap .ln-eq { background: #f6f8fa; }
+.diff-table-wrap .eq { background: #ffffff; }
+
+.diff-table-wrap .ln-del { background: #ffd7d5; color: #82071e; }
+.diff-table-wrap .sg-del { background: #ffd7d5; color: #cf222e; }
+.diff-table-wrap .del { background: #ffebe9; color: #24292f; }
+.diff-table-wrap .del-word { background: #ffcecb; border-radius: 2px; }
+
+.diff-table-wrap .ln-add { background: #abf2ca; color: #116329; }
+.diff-table-wrap .sg-add { background: #abf2ca; color: #1a7f37; }
+.diff-table-wrap .add { background: #dafbe1; color: #24292f; }
+.diff-table-wrap .add-word { background: #acf2bd; border-radius: 2px; }
+
+.diff-table-wrap .ln-ws { background: #e8e8f8; color: #4040a0; }
+.diff-table-wrap .sg-ws { background: #e8e8f8; color: #6060b0; }
+.diff-table-wrap .ws { background: #f0f0ff; color: #24292f; }
+.diff-table-wrap .ws .del-word { background: #d8d8f0; border-radius: 2px; }
+.diff-table-wrap .ws .add-word { background: #d8d8f0; border-radius: 2px; }
+
+.diff-table-wrap tr.row-hidden { display: none; }
+
+.diff-table-wrap tr.row-hl td { background: #fff8c5 !important; }
+.diff-table-wrap td.ln:not(:empty) { cursor: pointer; }
+.diff-table-wrap td.ln:not(:empty):hover { text-decoration: underline; }
+
+/* ---- Manual alignment mode (Beyond Compare style) ---- */
+.align-status {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 999;
+    padding: 8px 20px;
+    font-size: 13px;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    text-align: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+.align-status.active { display: block; }
+.align-status.mode-left { background: #fff3cd; color: #664d03; }
+.align-status.mode-right { background: #cfe2ff; color: #084298; }
+.align-status kbd {
+    display: inline-block;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-family: inherit;
+    background: rgba(0,0,0,0.08);
+    border: 1px solid rgba(0,0,0,0.15);
+    border-radius: 3px;
+    margin: 0 2px;
+}
+
+.diff-table-wrap td.align-pending {
+    outline: 2px solid #f59e0b;
+    outline-offset: -2px;
+    background: #fef3c7 !important;
+}
+.diff-table-wrap td.align-pending-sibling {
+    background: #fef3c7 !important;
+}
+
+.diff-table-wrap td.align-locked {
+    outline: 2px solid #3b82f6;
+    outline-offset: -2px;
+    background: #dbeafe !important;
+}
+.diff-table-wrap td.align-locked-sibling {
+    background: #dbeafe !important;
+}
+
+.diff-table-wrap.waiting-right td[data-side="r"]:not(:empty) {
+    cursor: crosshair;
+}
+.diff-table-wrap.waiting-right td[data-side="r"]:not(:empty):hover {
+    outline: 2px dashed #3b82f6;
+    outline-offset: -2px;
+}
+
+.diff-table-wrap tr.row-aligned {
+    border-left: 3px solid #f59e0b;
+}
+
+.diff-toolbar {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 6px;
+    padding: 6px 8px;
+    background: #f6f8fa;
+    border: 1px solid #d0d7de;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+}
+.diff-toolbar + .diff-table-wrap { border-radius: 0 0 6px 6px; }
+.diff-toolbar button {
+    padding: 3px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 4px;
+    color: #24292f;
+    line-height: 20px;
+    transition: background 0.1s;
+}
+.diff-toolbar button:hover:not(:disabled) { background: #f3f4f6; }
+.diff-toolbar button:disabled { opacity: 0.35; cursor: default; }
+
+.btn-copy { float: right; }
+.copy-spacer { flex: 1; }
+.copy-toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: #1f2937;
+    color: #fff;
+    padding: 8px 18px;
+    border-radius: 6px;
+    font-size: 13px;
+    z-index: 9999;
+    animation: toastFade 1.5s ease forwards;
+    pointer-events: none;
+}
+@keyframes toastFade {
+    0%,60% { opacity: 1; }
+    100% { opacity: 0; }
+}
+"""
+
+_JS = """
+var _activeFilter = null;
+
+function filterByBadge(badgeEl) {
+    var filter = badgeEl.getAttribute('data-filter');
+    var bar = badgeEl.closest('.summary-bar');
+    var allBadges = bar.querySelectorAll('.badge');
+
+    if (_activeFilter === filter || filter === 'all') {
+        _activeFilter = null;
+    } else {
+        _activeFilter = filter;
+    }
+
+    allBadges.forEach(function(b) {
+        b.classList.remove('active', 'dimmed');
+        if (_activeFilter) {
+            if (b.getAttribute('data-filter') === _activeFilter) {
+                b.classList.add('active');
+            } else if (b.getAttribute('data-filter') !== 'all') {
+                b.classList.add('dimmed');
+            }
+        }
+    });
+
+    var sidebar = document.querySelector('.sidebar:not([style*="display: none"])');
+    if (!sidebar) sidebar = document.querySelector('.sidebar');
+    if (!sidebar) return;
+
+    var links = sidebar.querySelectorAll('.pass-link');
+    var firstVisible = null;
+
+    links.forEach(function(link) {
+        var status = link.getAttribute('data-status');
+        if (!_activeFilter || status === _activeFilter) {
+            link.classList.remove('filtered-out');
+            if (!firstVisible) firstVisible = link;
+        } else {
+            link.classList.add('filtered-out');
+        }
+    });
+
+    if (firstVisible) {
+        var activeLink = sidebar.querySelector('.pass-link.active');
+        if (!activeLink || activeLink.classList.contains('filtered-out')) {
+            var sid = firstVisible.getAttribute('data-target');
+            showPass(firstVisible, sid);
+        }
+    }
+}
+
+function showPass(el, id) {
+    document.querySelectorAll('.pass-section').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('.pass-link').forEach(l => l.classList.remove('active'));
+    var sec = document.getElementById(id);
+    if (sec) sec.classList.add('active');
+    if (el) el.classList.add('active');
+}
+
+function showPhase(el, phase) {
+    document.querySelectorAll('.phase-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.sidebar').forEach(s => s.style.display = 'none');
+    document.querySelectorAll('.summary-bar').forEach(s => s.style.display = 'none');
+    if (el) el.classList.add('active');
+    var sb = document.getElementById('sb-' + phase);
+    if (sb) sb.style.display = '';
+    var sm = document.getElementById('sm-' + phase);
+    if (sm) sm.style.display = '';
+    document.querySelectorAll('.pass-section').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('.pass-link').forEach(l => l.classList.remove('active'));
+    var first = document.querySelector('[data-phase="' + phase + '"]');
+    if (first) {
+        var sid = first.getAttribute('data-target');
+        showPass(first, sid);
+    }
+}
+
+function toggleIr(btn) {
+    var section = btn.closest('.pass-section');
+    var block = section ? section.querySelector('.ir-block') : null;
+    if (block) {
+        block.classList.toggle('show');
+        btn.textContent = block.classList.contains('show')
+            ? '\\u25BC Collapse IR' : '\\u25B6 Show full IR';
+    }
+}
+
+function toggleIrLine(ln) {
+    var line = ln.closest('.ir-line');
+    var block = ln.closest('.ir-block');
+    if (!line || !block) return;
+    var wasHl = line.classList.contains('hl');
+    block.querySelectorAll('.ir-line.hl').forEach(function(l) { l.classList.remove('hl'); });
+    if (!wasHl) line.classList.add('hl');
+}
+
+function toggleCollapse(el) {
+    var sec = el.closest('.pass-section');
+    sec.classList.toggle('collapsed');
+}
+
+function copyIr(btn, side) {
+    var sec = btn.closest('.pass-section');
+    var el = sec.querySelector('.ir-data-' + side);
+    if (!el) return;
+    var text = el.textContent;
+    var label = side === 'before' ? 'Before' : side === 'after' ? 'After' : 'IR';
+    function showToast() {
+        var toast = document.createElement('div');
+        toast.className = 'copy-toast';
+        toast.textContent = 'Copied ' + label + ' IR';
+        document.body.appendChild(toast);
+        setTimeout(function() { toast.remove(); }, 1600);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(showToast).catch(function() {
+            fallbackCopy(text, showToast);
+        });
+    } else {
+        fallbackCopy(text, showToast);
+    }
+}
+function fallbackCopy(text, cb) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); if (cb) cb(); } catch(e) {}
+    ta.remove();
+}
+
+function expandAll(btn) {
+    var table = btn.closest('.pass-section').querySelector('table');
+    table.querySelectorAll('tr.row-hidden').forEach(function(r) { r.classList.remove('row-hidden'); });
+}
+
+function collapseCtx(btn) {
+    var table = btn.closest('.pass-section').querySelector('table');
+    table.querySelectorAll('tr[data-collapse="1"]').forEach(function(r) {
+        if (!r.classList.contains('btn-row')) r.classList.add('row-hidden');
+    });
+}
+
+/* ---- F7 Manual alignment (Beyond Compare style) ---- */
+var _alignMode = null;
+var _pendingLeft = null;
+var _alignStatus = null;
+
+function cancelAlign() {
+    if (_pendingLeft) {
+        var row = _pendingLeft.closest('tr');
+        if (row) row.querySelectorAll('.align-pending,.align-pending-sibling,.align-locked,.align-locked-sibling')
+            .forEach(function(c){ c.classList.remove('align-pending','align-pending-sibling','align-locked','align-locked-sibling'); });
+    }
+    document.querySelectorAll('.align-locked,.align-locked-sibling').forEach(function(c){ c.classList.remove('align-locked','align-locked-sibling'); });
+    document.querySelectorAll('.waiting-right').forEach(function(c){ c.classList.remove('waiting-right'); });
+    _pendingLeft = null;
+    _alignMode = null;
+    if (_alignStatus) { _alignStatus.className = 'align-status'; _alignStatus.innerHTML = ''; }
+}
+
+function showAlignStatus(mode, msg) {
+    if (!_alignStatus) return;
+    _alignStatus.className = 'align-status active mode-' + mode;
+    _alignStatus.innerHTML = msg;
+}
+
+function alignRows(leftTd, rightTd) {
+    var lIdx = parseInt(leftTd.getAttribute('data-idx'), 10);
+    var rIdx = parseInt(rightTd.getAttribute('data-idx'), 10);
+    var section = leftTd.closest('.pass-section');
+    var beforeLines = getBeforeLines(section);
+    var afterLines = getAfterLines(section);
+    if (isNaN(lIdx) || isNaN(rIdx)) return;
+
+    var upper = lcsOpcodes(beforeLines.slice(0, lIdx), afterLines.slice(0, rIdx), 0, 0);
+    var lower = lcsOpcodes(beforeLines.slice(lIdx + 1), afterLines.slice(rIdx + 1), lIdx + 1, rIdx + 1);
+    var mid = [{ tag: 'replace', i1: lIdx, i2: lIdx + 1, j1: rIdx, j2: rIdx + 1 }];
+    var opcodes = upper.concat(mid, lower);
+
+    var wrap = section.querySelector('.diff-table-wrap');
+    var table = wrap.querySelector('table');
+    table.innerHTML = buildDiffRowsHtml(opcodes, beforeLines, afterLines, lIdx, rIdx);
+}
+
+function getBeforeLines(section) {
+    var el = section.querySelector('.ir-data-before');
+    return el ? el.textContent.split('\\n') : [];
+}
+function getAfterLines(section) {
+    var el = section.querySelector('.ir-data-after');
+    return el ? el.textContent.split('\\n') : [];
+}
+
+function lcsOpcodes(a, b, aOff, bOff) {
+    var m = a.length, n = b.length;
+    var dp = [];
+    for (var i = 0; i <= m; i++) { dp[i] = new Array(n + 1).fill(0); }
+    for (var i = m - 1; i >= 0; i--) {
+        for (var j = n - 1; j >= 0; j--) {
+            dp[i][j] = (a[i] === b[j]) ? dp[i+1][j+1] + 1 : Math.max(dp[i+1][j], dp[i][j+1]);
+        }
+    }
+    var blocks = [], i = 0, j = 0;
+    while (i < m && j < n) {
+        if (a[i] === b[j]) {
+            var si = i, sj = j;
+            while (i < m && j < n && a[i] === b[j]) { i++; j++; }
+            blocks.push([si, sj, i - si]);
+        } else if (dp[i+1][j] >= dp[i][j+1]) { i++; } else { j++; }
+    }
+    var ops = [], ai = 0, bi = 0;
+    for (var k = 0; k < blocks.length; k++) {
+        var si = blocks[k][0], sj = blocks[k][1], size = blocks[k][2];
+        if (si > ai || sj > bi) {
+            var tag = (si > ai && sj > bi) ? 'replace' : (si > ai ? 'delete' : 'insert');
+            ops.push({ tag: tag, i1: ai + aOff, i2: si + aOff, j1: bi + bOff, j2: sj + bOff });
+        }
+        ops.push({ tag: 'equal', i1: si + aOff, i2: si + size + aOff, j1: sj + bOff, j2: sj + size + bOff });
+        ai = si + size; bi = sj + size;
+    }
+    if (ai < m || bi < n) {
+        var tag = (ai < m && bi < n) ? 'replace' : (ai < m ? 'delete' : 'insert');
+        ops.push({ tag: tag, i1: ai + aOff, i2: m + aOff, j1: bi + bOff, j2: n + bOff });
+    }
+    return ops;
+}
+
+function buildDiffRowsHtml(opcodes, beforeLines, afterLines, pinL, pinR) {
+    var s = '<colgroup><col style="width:50px"><col style="width:20px"><col><col style="width:50px"><col style="width:20px"><col></colgroup>';
+    var rows = [];
+    for (var o = 0; o < opcodes.length; o++) {
+        var op = opcodes[o];
+        if (op.tag === 'equal') {
+            for (var i = op.i1; i < op.i2; i++) {
+                var j = op.j1 + (i - op.i1);
+                rows.push('<tr>' +
+                    '<td class="ln ln-eq" data-side="l" data-idx="' + i + '">' + (i+1) + '</td>' +
+                    '<td class="sg"></td><td class="eq">' + escHtml(beforeLines[i]||'') + '</td>' +
+                    '<td class="ln ln-eq" data-side="r" data-idx="' + j + '">' + (j+1) + '</td>' +
+                    '<td class="sg"></td><td class="eq">' + escHtml(afterLines[j]||'') + '</td></tr>');
+            }
+        } else if (op.tag === 'replace') {
+            var lLeft = op.i2 - op.i1, lRight = op.j2 - op.j1;
+            var pairs = [], usedL = {}, usedR = {};
+            for (var li = op.i1; li < op.i2; li++) {
+                for (var ri = op.j1; ri < op.j2; ri++) {
+                    if (usedR[ri]) continue;
+                    if ((beforeLines[li]||'').trim() === (afterLines[ri]||'').trim()) {
+                        pairs.push([li, ri, true]); usedL[li] = true; usedR[ri] = true; break;
+                    }
+                }
+            }
+            var remL = [], remR = [];
+            for (var k = op.i1; k < op.i2; k++) { if (!usedL[k]) remL.push(k); }
+            for (var k = op.j1; k < op.j2; k++) { if (!usedR[k]) remR.push(k); }
+            var all = pairs.slice();
+            for (var k = 0; k < Math.max(remL.length, remR.length); k++) {
+                if (k < remL.length && k < remR.length) all.push([remL[k], remR[k], false]);
+                else if (k < remL.length) all.push([remL[k], null, false]);
+                else all.push([null, remR[k], false]);
+            }
+            all.sort(function(a,b) {
+                var la = a[0]!==null ? a[0] : a[1], lb = b[0]!==null ? b[0] : b[1];
+                return la - lb;
+            });
+            for (var k = 0; k < all.length; k++) {
+                var li = all[k][0], ri = all[k][1], matched = all[k][2];
+                var isPinned = (li === pinL && ri === pinR);
+                if (li !== null && ri !== null) {
+                    var diff = jsInlineDiff(beforeLines[li]||'', afterLines[ri]||'');
+                    if (diff.isWsOnly && matched) {
+                        var cls = isPinned ? ' class="row-aligned"' : '';
+                        rows.push('<tr' + cls + '>' +
+                            '<td class="ln ln-ws" data-side="l" data-idx="' + li + '">' + (li+1) + '</td>' +
+                            '<td class="sg sg-ws">~</td><td class="ws">' + diff.left + '</td>' +
+                            '<td class="ln ln-ws" data-side="r" data-idx="' + ri + '">' + (ri+1) + '</td>' +
+                            '<td class="sg sg-ws">~</td><td class="ws">' + diff.right + '</td></tr>');
+                    } else {
+                        var cls = isPinned ? ' class="row-aligned"' : '';
+                        rows.push('<tr' + cls + '>' +
+                            '<td class="ln ln-del" data-side="l" data-idx="' + li + '">' + (li+1) + '</td>' +
+                            '<td class="sg sg-del">\u2212</td><td class="del">' + diff.left + '</td>' +
+                            '<td class="ln ln-add" data-side="r" data-idx="' + ri + '">' + (ri+1) + '</td>' +
+                            '<td class="sg sg-add">+</td><td class="add">' + diff.right + '</td></tr>');
+                    }
+                } else if (li !== null) {
+                    rows.push('<tr>' +
+                        '<td class="ln ln-del" data-side="l" data-idx="' + li + '">' + (li+1) + '</td>' +
+                        '<td class="sg sg-del">\u2212</td><td class="del">' + escHtml(beforeLines[li]||'') + '</td>' +
+                        '<td class="ln"></td><td class="sg"></td><td></td></tr>');
+                } else {
+                    rows.push('<tr>' +
+                        '<td class="ln"></td><td class="sg"></td><td></td>' +
+                        '<td class="ln ln-add" data-side="r" data-idx="' + ri + '">' + (ri+1) + '</td>' +
+                        '<td class="sg sg-add">+</td><td class="add">' + escHtml(afterLines[ri]||'') + '</td></tr>');
+                }
+            }
+        } else if (op.tag === 'delete') {
+            for (var i = op.i1; i < op.i2; i++) {
+                rows.push('<tr>' +
+                    '<td class="ln ln-del" data-side="l" data-idx="' + i + '">' + (i+1) + '</td>' +
+                    '<td class="sg sg-del">\u2212</td><td class="del">' + escHtml(beforeLines[i]||'') + '</td>' +
+                    '<td class="ln"></td><td class="sg"></td><td></td></tr>');
+            }
+        } else if (op.tag === 'insert') {
+            for (var j = op.j1; j < op.j2; j++) {
+                rows.push('<tr>' +
+                    '<td class="ln"></td><td class="sg"></td><td></td>' +
+                    '<td class="ln ln-add" data-side="r" data-idx="' + j + '">' + (j+1) + '</td>' +
+                    '<td class="sg sg-add">+</td><td class="add">' + escHtml(afterLines[j]||'') + '</td></tr>');
+            }
+        }
+    }
+    return s + rows.join('');
+}
+
+function jsInlineDiff(before, after) {
+    var m = before.length, n = after.length;
+    var left = [], right = [], isWsOnly = true;
+    var sm = [];
+    for (var i = 0; i <= m; i++) {
+        sm[i] = [];
+        for (var j = 0; j <= n; j++) sm[i][j] = 0;
+    }
+    for (var i = m - 1; i >= 0; i--) {
+        for (var j = n - 1; j >= 0; j--) {
+            if (before[i] === after[j]) sm[i][j] = sm[i+1][j+1] + 1;
+            else sm[i][j] = Math.max(sm[i+1][j], sm[i][j+1]);
+        }
+    }
+    var i = 0, j = 0;
+    while (i < m && j < n) {
+        if (before[i] === after[j]) {
+            left.push(escHtml(before[i]));
+            right.push(escHtml(after[j]));
+            i++; j++;
+        } else if (sm[i+1] && sm[i+1][j] >= sm[i][j+1]) {
+            var chunk = before[i];
+            i++;
+            while (i < m && (j >= n || (sm[i+1] && sm[i+1][j] >= sm[i][j+1])) && before[i] !== after[j]) {
+                chunk += before[i]; i++;
+            }
+            if (chunk.trim() !== '') isWsOnly = false;
+            left.push('<span class="del-word">' + escHtml(chunk) + '</span>');
+        } else {
+            var chunk = after[j];
+            j++;
+            while (j < n && (i >= m || sm[i][j+1] > sm[i+1][j]) && before[i] !== after[j]) {
+                chunk += after[j]; j++;
+            }
+            if (chunk.trim() !== '') isWsOnly = false;
+            right.push('<span class="add-word">' + escHtml(chunk) + '</span>');
+        }
+    }
+    if (i < m) {
+        var rest = before.slice(i);
+        if (rest.trim() !== '') isWsOnly = false;
+        left.push('<span class="del-word">' + escHtml(rest) + '</span>');
+    }
+    if (j < n) {
+        var rest = after.slice(j);
+        if (rest.trim() !== '') isWsOnly = false;
+        right.push('<span class="add-word">' + escHtml(rest) + '</span>');
+    }
+    return { left: left.join(''), right: right.join(''), isWsOnly: isWsOnly };
+}
+
+function escHtml(text) {
+    return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function initSidebarResize() {
+    var handle = document.getElementById('sidebar-resize');
+    var openBtn = document.getElementById('sidebar-open-btn');
+    if (!handle) return;
+
+    var sidebar = document.querySelector('.sidebar:not([style*="display: none"])') || document.querySelector('.sidebar');
+    if (!sidebar) return;
+
+    var dragging = false, startX = 0, startW = 0;
+
+    handle.addEventListener('mousedown', function(e) {
+        if (sidebar.classList.contains('collapsed')) return;
+        dragging = true;
+        startX = e.clientX;
+        startW = sidebar.offsetWidth;
+        handle.classList.add('active');
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', function(e) {
+        if (!dragging) return;
+        var w = Math.max(150, Math.min(600, startW + e.clientX - startX));
+        sidebar.style.width = w + 'px';
+    });
+
+    document.addEventListener('mouseup', function() {
+        if (!dragging) return;
+        dragging = false;
+        handle.classList.remove('active');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+    });
+}
+
+function toggleSidebar(btn) {
+    var sidebars = document.querySelectorAll('.sidebar');
+    var handle = document.getElementById('sidebar-resize');
+    var openBtn = document.getElementById('sidebar-open-btn');
+    sidebars.forEach(function(s) { s.classList.add('collapsed'); });
+    if (handle) handle.style.display = 'none';
+    if (openBtn) openBtn.style.display = '';
+    document.querySelectorAll('.sidebar-toggle-btn.inside').forEach(function(b) { b.style.display = 'none'; });
+}
+
+function openSidebar() {
+    var sidebars = document.querySelectorAll('.sidebar');
+    var handle = document.getElementById('sidebar-resize');
+    var openBtn = document.getElementById('sidebar-open-btn');
+    sidebars.forEach(function(s) { s.classList.remove('collapsed'); s.style.width = ''; });
+    if (handle) handle.style.display = '';
+    if (openBtn) openBtn.style.display = 'none';
+    document.querySelectorAll('.sidebar-toggle-btn.inside').forEach(function(b) { b.style.display = ''; });
+}
+"""
+
+
+def render_pass_section(rec: LowerRecord) -> str:
+    """Render a single pass section as HTML."""
+    sid = f"sec-{rec.phase}-{rec.index}"
+
+    if rec.status == STATUS_FAILED:
+        error_html = f'<div class="error-box"><div class="error-label">Exception</div>{_esc(rec.error_msg)}</div>'
+        if rec.before_text:
+            _ir_lines = rec.before_text.splitlines()
+            _ln_width = len(str(len(_ir_lines)))
+            _ir_with_ln = "".join(
+                f'<span class="ir-line"><span class="ir-ln" onclick="toggleIrLine(this)">{str(i + 1).rjust(_ln_width)}</span>{_esc(line)}</span>'
+                for i, line in enumerate(_ir_lines)
+            )
+            before_content = (
+                '<p class="noop-msg">IR before this pass (execution failed):</p>'
+                '<button class="ir-toggle" onclick="toggleIr(this)">&#9654; Show before IR</button>'
+                f'<div class="ir-block"><pre>{_ir_with_ln}</pre></div>'
+            )
+        else:
+            before_content = ""
+        status_html = '<span class="status status-failed">✘ FAILED</span>'
+        return (
+            f'<div class="pass-section failed-section" id="{sid}">'
+            f'<div class="pass-header">'
+            f"<h2>{rec.index:02d}. {rec.name}</h2>"
+            f"{status_html}"
+            f"</div>"
+            f"{error_html}"
+            f"{before_content}"
+            f'<pre hidden class="ir-data-before">{_esc(rec.before_text) if rec.before_text else ""}</pre>'
+            f"</div>"
+        )
+
+    elif rec.status == STATUS_SKIPPED:
+        status_html = '<span class="status status-skipped">— SKIPPED</span>'
+        return (
+            f'<div class="pass-section skipped-section" id="{sid}">'
+            f'<div class="pass-header">'
+            f"<h2>{rec.index:02d}. {rec.name}</h2>"
+            f"{status_html}"
+            f"</div>"
+            f'<p class="noop-msg">This pass did not run (a previous pass failed).</p>'
+            f"</div>"
+        )
+
+    elif rec.changed:
+        diff_html = _make_diff_html(rec.before_text, rec.after_text, context=3)
+        diff_content = (
+            f'<div class="diff-toolbar">'
+            f'<button class="btn-expand-all" '
+            f'onclick="expandAll(this)">⊞ Show all context</button>'
+            f'<button onclick="collapseCtx(this)">⊟ Collapse</button>'
+            f'<span class="copy-spacer"></span>'
+            f'<button class="btn-copy" onclick="copyIr(this,\'before\')">📋 Copy Before</button>'
+            f'<button class="btn-copy" onclick="copyIr(this,\'after\')">📋 Copy After</button>'
+            f"</div>"
+            f"{diff_html}"
+        )
+        status_html = '<span class="status status-changed">CHANGED</span>'
+        return (
+            f'<div class="pass-section" id="{sid}">'
+            f'<div class="pass-header collapsible" onclick="toggleCollapse(this)">'
+            f'<span class="pass-toggle"></span>'
+            f"<h2>{rec.index:02d}. {rec.name}</h2>"
+            f"{status_html}"
+            f"</div>"
+            f"{diff_content}"
+            f'<pre hidden class="ir-data-before">{_esc(rec.before_text)}</pre>'
+            f'<pre hidden class="ir-data-after">{_esc(rec.after_text)}</pre>'
+            f"</div>"
+        )
+    else:
+        _ir_lines = rec.after_text.splitlines()
+        _ln_width = len(str(len(_ir_lines)))
+        _ir_with_ln = "".join(
+            f'<span class="ir-line"><span class="ir-ln" onclick="toggleIrLine(this)">{str(i + 1).rjust(_ln_width)}</span>{_esc(line)}</span>'
+            for i, line in enumerate(_ir_lines)
+        )
+        diff_content = (
+            '<p class="noop-msg">This pass did not modify the IR.</p>'
+            '<button class="ir-toggle" onclick="toggleIr(this)">&#9654; Show full IR</button>'
+            '<button class="btn-copy" onclick="copyIr(this,\'after\')">📋 Copy IR</button>'
+            f'<div class="ir-block"><pre>{_ir_with_ln}</pre></div>'
+        )
+        status_html = '<span class="status status-noop">NO-OP</span>'
+        return (
+            f'<div class="pass-section" id="{sid}">'
+            f'<div class="pass-header">'
+            f"<h2>{rec.index:02d}. {rec.name}</h2>"
+            f"{status_html}"
+            f"</div>"
+            f"{diff_content}"
+            f'<pre hidden class="ir-data-after">{_esc(rec.after_text)}</pre>'
+            f"</div>"
+        )
+
+
+def generate_html(records: list[LowerRecord], output_path: str):
+    """Generate a self-contained HTML file with pass trace visualization."""
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    phases: dict = {}
+    for rec in records:
+        phases.setdefault(rec.phase, []).append(rec)
+
+    phase_tabs_html = []
+    sidebars_html = []
+    summaries_html = []
+    sections_html = []
+
+    for pi, (phase_name, phase_records) in enumerate(phases.items()):
+        is_active = pi == 0
+        active_cls = " active" if is_active else ""
+        active_style = "" if is_active else ' style="display:none"'
+
+        pretty_phase = phase_name.replace("_", " ").replace("phase1", "Phase 1:").replace("phase2", "Phase 2:").replace("pipeline", "Pipeline:")
+        pretty_phase = pretty_phase.strip()
+        if pretty_phase and pretty_phase[0].islower():
+            pretty_phase = pretty_phase[0].upper() + pretty_phase[1:]
+
+        n_total = len(phase_records)
+        n_completed = sum(1 for r in phase_records if r.status == STATUS_COMPLETED)
+        n_changed = sum(1 for r in phase_records if r.changed)
+        n_failed = sum(1 for r in phase_records if r.status == STATUS_FAILED)
+        n_skipped = sum(1 for r in phase_records if r.status == STATUS_SKIPPED)
+        n_noop = n_completed - n_changed
+
+        phase_tabs_html.append(f'<div class="phase-tab{active_cls}" onclick="showPhase(this, \'{phase_name}\')">{pretty_phase}</div>')
+
+        failed_badge = ""
+        skipped_badge = ""
+        if n_failed:
+            failed_badge = f'<span class="badge badge-failed" data-filter="failed" onclick="filterByBadge(this)">✘ {n_failed} failed</span>'
+        if n_skipped:
+            skipped_badge = (
+                f'<span class="badge badge-skipped" data-filter="skipped" onclick="filterByBadge(this)">— {n_skipped} skipped</span>'
+            )
+        summaries_html.append(
+            f'<div class="summary-bar" id="sm-{phase_name}"{active_style}>'
+            f'<span class="badge badge-total" data-filter="all" onclick="filterByBadge(this)">{n_total} passes</span>'
+            f'<span class="badge badge-changed" data-filter="changed" onclick="filterByBadge(this)">{n_changed} changed</span>'
+            f'<span class="badge badge-noop" data-filter="noop" onclick="filterByBadge(this)">{n_noop} no-op</span>'
+            f"{failed_badge}"
+            f"{skipped_badge}"
+            f"</div>"
+        )
+
+        links = []
+        for rec in phase_records:
+            if rec.status == STATUS_FAILED:
+                dot_cls = "failed"
+                status_attr = "failed"
+            elif rec.status == STATUS_SKIPPED:
+                dot_cls = "skipped"
+                status_attr = "skipped"
+            elif rec.changed:
+                dot_cls = "changed"
+                status_attr = "changed"
+            else:
+                dot_cls = "noop"
+                status_attr = "noop"
+            sid = f"sec-{rec.phase}-{rec.index}"
+            stats_html = ""
+            if rec.changed:
+                stats_html = (
+                    f'<span class="pass-stats">'
+                    f'<span class="st-add">+{rec.add_lines}</span> '
+                    f'<span class="st-del">−{rec.del_lines}</span>'
+                    f"</span>"
+                )
+            elif rec.status == STATUS_FAILED:
+                stats_html = '<span class="pass-stats"><span class="st-del">ERROR</span></span>'
+            elif rec.status == STATUS_SKIPPED:
+                stats_html = '<span class="pass-stats" style="color:#94a3b8">—</span>'
+            links.append(
+                f'<a class="pass-link" data-phase="{rec.phase}" data-target="{sid}" '
+                f'data-status="{status_attr}" '
+                f"onclick=\"showPass(this, '{sid}')\">"
+                f'<span class="pass-idx">{rec.index:02d}</span>'
+                f'<span class="pass-dot {dot_cls}"></span>'
+                f'<span class="pass-label">{rec.name}</span>'
+                f"{stats_html}"
+                f"</a>"
+            )
+        sidebars_html.append(
+            f'<div class="sidebar" id="sb-{phase_name}"{active_style}>'
+            f'<button class="sidebar-toggle-btn inside" onclick="toggleSidebar(this)" title="Collapse sidebar"><span class="chevron"></span></button>'
+            f'<div class="section-title">Passes</div>' + "\n".join(links) + "</div>"
+        )
+
+        for rec in phase_records:
+            sections_html.append(render_pass_section(rec))
+
+    auto_show_js = ""
+    if records:
+        first_sid = f"sec-{records[0].phase}-{records[0].index}"
+        auto_show_js = (
+            "document.addEventListener('DOMContentLoaded', function() {\n"
+            f"  var firstSid = '{first_sid}';\n"
+            "  var el = document.querySelector('[data-target=\"' + firstSid + '\"]');\n"
+            "  if (el) showPass(el, firstSid);\n"
+            "  if (typeof initSidebarResize === 'function') initSidebarResize();\n"
+            "  _alignStatus = document.getElementById('align-status');\n"
+            "\n"
+            "  var passLinks = document.getElementsByClassName('pass-link');\n"
+            "  var activeLink = el || null;\n"
+            "\n"
+            "  document.addEventListener('keydown', function(e) {\n"
+            "    var tag = (e.target.tagName || '').toLowerCase();\n"
+            "    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;\n"
+            "\n"
+            "    if (e.key === 'j' || e.key === 'k') {\n"
+            "      e.preventDefault();\n"
+            "      var idx = -1;\n"
+            "      for (var i = 0; i < passLinks.length; i++) {\n"
+            "        if (passLinks[i] === activeLink) { idx = i; break; }\n"
+            "      }\n"
+            "      if (e.key === 'j' && idx < passLinks.length - 1) idx++;\n"
+            "      else if (e.key === 'k' && idx > 0) idx--;\n"
+            "      else return;\n"
+            "      var next = passLinks[idx];\n"
+            "      var phase = next.getAttribute('data-phase');\n"
+            "      var curTab = document.querySelector('.phase-tab.active');\n"
+            "      if (!curTab || curTab.textContent.indexOf(phase.replace('phase1','Phase 1').replace('phase2','Phase 2')) < 0) {\n"
+            "        var tabs = document.querySelectorAll('.phase-tab');\n"
+            "        for (var t = 0; t < tabs.length; t++) {\n"
+            "          if (tabs[t].getAttribute('onclick').indexOf(phase) > -1) {\n"
+            "            showPhase(tabs[t], phase); break;\n"
+            "          }\n"
+            "        }\n"
+            "      }\n"
+            "      activeLink = next;\n"
+            "      var sid = next.getAttribute('data-target');\n"
+            "      showPass(next, sid);\n"
+            "      next.scrollIntoView({block: 'nearest'});\n"
+            "      var sec = document.getElementById(sid);\n"
+            "      if (sec) sec.scrollIntoView({block: 'start'});\n"
+            "    }\n"
+            "\n"
+            "    if (e.key === 'E' && e.shiftKey && !e.ctrlKey && !e.metaKey) {\n"
+            "      e.preventDefault();\n"
+            "      document.querySelectorAll('.pass-section table tr.row-hidden').forEach(function(r) {\n"
+            "        r.classList.remove('row-hidden');\n"
+            "      });\n"
+            "    }\n"
+            "\n"
+            "    if (e.key === 'F7') {\n"
+            "      e.preventDefault();\n"
+            "      if (_alignMode === null) {\n"
+            "        _alignMode = 'left';\n"
+            "        showAlignStatus('left', 'Align: Click a <b>left</b> (before) line number &nbsp; <kbd>F7</kbd> to confirm &nbsp; <kbd>Esc</kbd> to cancel');\n"
+            "      } else if (_alignMode === 'left' && _pendingLeft) {\n"
+            "        _alignMode = 'right';\n"
+            "        _pendingLeft.classList.remove('align-pending');\n"
+            "        _pendingLeft.classList.add('align-locked');\n"
+            "        var sib = _pendingLeft.nextElementSibling;\n"
+            "        while (sib && sib.getAttribute('data-side') !== 'r') {\n"
+            "          if (sib.getAttribute('data-side') === 'l') sib.classList.add('align-locked-sibling');\n"
+            "          sib = sib.nextElementSibling;\n"
+            "        }\n"
+            "        var wrap = _pendingLeft.closest('.diff-table-wrap');\n"
+            "        if (wrap) wrap.classList.add('waiting-right');\n"
+            "        showAlignStatus('right', 'Align: Click a <b>right</b> (after) line number to align &nbsp; <kbd>Esc</kbd> to cancel');\n"
+            "      } else if (_alignMode === 'right') {\n"
+            "        cancelAlign();\n"
+            "      }\n"
+            "      return;\n"
+            "    }\n"
+            "\n"
+            "    if (e.key === 'Escape' && _alignMode) {\n"
+            "      e.preventDefault();\n"
+            "      cancelAlign();\n"
+            "      return;\n"
+            "    }\n"
+            "  });\n"
+            "\n"
+            "  document.addEventListener('click', function(e) {\n"
+            "    if (!_alignMode) return;\n"
+            "    var td = e.target.closest('td[data-side]');\n"
+            "    if (!td) return;\n"
+            "    var section = td.closest('.pass-section.active');\n"
+            "    if (!section) return;\n"
+            "    if (_alignMode === 'left' && td.getAttribute('data-side') === 'l' && td.textContent.trim() !== '') {\n"
+            "      e.stopPropagation();\n"
+            "      if (_pendingLeft) {\n"
+            "        var oldRow = _pendingLeft.closest('tr');\n"
+            "        if (oldRow) oldRow.querySelectorAll('.align-pending,.align-pending-sibling')\n"
+            "          .forEach(function(c){ c.classList.remove('align-pending','align-pending-sibling'); });\n"
+            "      }\n"
+            "      _pendingLeft = td;\n"
+            "      td.classList.add('align-pending');\n"
+            "      var sib = td.nextElementSibling;\n"
+            "      while (sib && sib.getAttribute('data-side') !== 'r') {\n"
+            "        if (sib.getAttribute('data-side') === 'l') sib.classList.add('align-pending-sibling');\n"
+            "        sib = sib.nextElementSibling;\n"
+            "      }\n"
+            "      showAlignStatus('left', 'Left line <b>' + td.textContent.trim() + '</b> selected &nbsp; Press <kbd>F7</kbd> to confirm &nbsp; <kbd>Esc</kbd> to cancel');\n"
+            "      return;\n"
+            "    }\n"
+            "    if (_alignMode === 'right' && td.getAttribute('data-side') === 'r' && td.textContent.trim() !== '' && _pendingLeft) {\n"
+            "      e.stopPropagation();\n"
+            "      alignRows(_pendingLeft, td);\n"
+            "      cancelAlign();\n"
+            "      return;\n"
+            "    }\n"
+            "  }, true);\n"
+            "\n"
+            "  document.addEventListener('click', function(e) {\n"
+            "    var td = e.target.closest('td[data-side]');\n"
+            "    if (!td) return;\n"
+            "    var tr = td.closest('tr');\n"
+            "    if (!tr || tr.closest('.pass-section.active') === null) return;\n"
+            "    var wasHl = tr.classList.contains('row-hl');\n"
+            "    document.querySelectorAll('tr.row-hl').forEach(function(r) { r.classList.remove('row-hl'); });\n"
+            "    if (!wasHl) tr.classList.add('row-hl');\n"
+            "  });\n"
+            "});\n"
+        )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TileLang Lower Trace</title>
+<style>{_CSS}</style>
+</head>
+<body>
+<div class="align-status" id="align-status"></div>
+<div class="header">
+  <h1>TileLang Lower Trace</h1>
+  <div class="sub">Compilation pipeline visualization &middot; {len(records)} passes recorded</div>
+</div>
+<div class="phase-tabs">
+  {"".join(phase_tabs_html)}
+</div>
+{"".join(summaries_html)}
+<div class="main">
+  {"".join(sidebars_html)}
+  <div class="sidebar-resize" id="sidebar-resize"></div>
+  <button class="sidebar-toggle-btn" id="sidebar-open-btn" onclick="openSidebar()" style="display:none" title="Show sidebar"><span class="chevron"></span></button>
+  <div class="content">
+    {"".join(sections_html)}
+  </div>
+</div>
+<script>
+{_JS}
+{auto_show_js}
+</script>
+</body>
+</html>"""
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html)
