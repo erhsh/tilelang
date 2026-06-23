@@ -294,6 +294,45 @@ def _make_diff_html(before_text: str, after_text: str, context: int = 3) -> str:
                     f'<td class="sg sg-add">+</td><td class="add">{_esc(after_lines[j])}</td></tr>'
                 )
 
+    # --- Identify contiguous runs of collapsed (hidden) rows ---
+    collapse_flags = ['data-collapse="1"' in r and 'class="row-hidden"' in r for r in rows]
+
+    run_list: list[tuple[int, int]] = []
+    in_run = False
+    for idx, is_collapsed in enumerate(collapse_flags):
+        if is_collapsed and not in_run:
+            run_start = idx
+            in_run = True
+        elif not is_collapsed and in_run:
+            run_list.append((run_start, idx))
+            in_run = False
+    if in_run:
+        run_list.append((run_start, len(rows)))
+
+    # Tag hidden rows with their run index (used by JS to scope expansion)
+    for run_idx, (r1, r2) in enumerate(run_list):
+        for i in range(r1, r2):
+            rows[i] = rows[i].replace('class="row-hidden"', f'class="row-hidden" data-run="{run_idx}"')
+
+    # --- Insert expand button rows ---
+    # One "↑↓ Expand" button after each run, expanding hidden rows in both
+    # directions.  Insertions are applied from bottom to top so indices stay valid.
+    insertions: list[tuple[int, str]] = []
+    for ri, (_r1, r2) in enumerate(run_list):
+        insertions.append(
+            (
+                r2,
+                f'<tr class="btn-row">'
+                f'<td colspan="6" data-run="{ri}" '
+                f'onclick="expand(this,20,event)">'
+                f'<span class="exp-arrow">\u2191\u2193</span>'
+                f'<span class="exp-label">Expand</span>'
+                f"</td></tr>",
+            )
+        )
+    for pos, html in sorted(insertions, key=lambda x: x[0], reverse=True):
+        rows.insert(pos, html)
+
     return (
         '<div class="diff-table-wrap">'
         "<table><colgroup>"

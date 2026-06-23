@@ -66,6 +66,8 @@ _CSS = """
     --align-right-bg: #cfe2ff;
     --align-right-text: #084298;
     --align-locked-bg: #dbeafe;
+    --blue-bg-light: #ddf4ff;
+    --blue-bg-hover: #c8e9ff;
     --toast-bg: #1f2937;
 }
 
@@ -126,6 +128,8 @@ _CSS = """
     --align-right-bg: #1e3a5f;
     --align-right-text: #89dceb;
     --align-locked-bg: #1e3a5f;
+    --blue-bg-light: #1e3a5f;
+    --blue-bg-hover: #2e4a6f;
     --toast-bg: #cdd6f4;
 }
 
@@ -621,6 +625,24 @@ body {
 .diff-table-wrap td.ln:not(:empty) { cursor: pointer; }
 .diff-table-wrap td.ln:not(:empty):hover { text-decoration: underline; }
 
+/* Inline expand button rows (GitHub-style full-row) */
+.diff-table-wrap .btn-row td {
+    text-align: center;
+    padding: 4px 8px;
+    background: var(--blue-bg-light, #ddf4ff);
+    color: var(--accent-blue);
+    cursor: pointer;
+    font-size: 12px;
+    border-top: 1px solid var(--accent-blue);
+    border-bottom: 1px solid var(--accent-blue);
+    user-select: none;
+    line-height: 20px;
+}
+.diff-table-wrap .btn-row td:hover { background: var(--blue-bg-hover, #c8e9ff); }
+.diff-table-wrap .btn-row.all-expanded td { display: none; }
+.diff-table-wrap .btn-row .exp-arrow { font-weight: 700; font-size: 14px; padding: 0 2px; }
+.diff-table-wrap .btn-row .exp-label { padding: 0 4px; }
+
 /* ---- Manual alignment mode (Beyond Compare style) ---- */
 .align-status {
     display: none;
@@ -797,6 +819,11 @@ function showPass(el, id) {
     var sec = document.getElementById(id);
     if (sec) sec.classList.add('active');
     if (el) el.classList.add('active');
+    if (typeof cancelAlign === 'function') cancelAlign();
+    if (sec) {
+        var tbl = sec.querySelector('table');
+        if (tbl && typeof updBtns === 'function') updBtns(tbl);
+    }
 }
 
 function showPhase(el, phase) {
@@ -872,9 +899,32 @@ function fallbackCopy(text, cb) {
     ta.remove();
 }
 
+function expand(el, n, evt) {
+    var run = el.dataset.run;
+    var tr = el.closest('tr');
+    var table = tr.closest('table');
+    var limit = (evt && evt.altKey) ? 999999 : n;
+    var shown = 0, r;
+    r = tr.previousElementSibling;
+    while (r && shown < limit) {
+        if (!r.classList.contains('row-hidden') || r.dataset.run !== run) break;
+        r.classList.remove('row-hidden'); shown++;
+        r = r.previousElementSibling;
+    }
+    shown = 0;
+    r = tr.nextElementSibling;
+    while (r && shown < limit) {
+        if (!r.classList.contains('row-hidden') || r.dataset.run !== run) break;
+        r.classList.remove('row-hidden'); shown++;
+        r = r.nextElementSibling;
+    }
+    updBtns(table);
+}
+
 function expandAll(btn) {
     var table = btn.closest('.pass-section').querySelector('table');
     table.querySelectorAll('tr.row-hidden').forEach(function(r) { r.classList.remove('row-hidden'); });
+    updBtns(table);
 }
 
 function collapseCtx(btn) {
@@ -882,6 +932,39 @@ function collapseCtx(btn) {
     table.querySelectorAll('tr[data-collapse="1"]').forEach(function(r) {
         if (!r.classList.contains('btn-row')) r.classList.add('row-hidden');
     });
+    updBtns(table);
+}
+
+function updBtns(table) {
+    var sec = table.closest('.pass-section');
+    var hid = table.querySelectorAll('tr.row-hidden');
+    var ba = sec.querySelector('.btn-expand-all');
+    if (hid.length === 0) {
+        table.querySelectorAll('.btn-row').forEach(function(r) { r.classList.add('all-expanded'); });
+        if (ba) ba.disabled = true;
+        return;
+    }
+    table.querySelectorAll('.btn-row td[data-run]').forEach(function(td) {
+        var run = td.dataset.run;
+        var tr = td.closest('tr');
+        var hasHidden = false;
+        var r = tr.previousElementSibling;
+        while (r) {
+            if (r.classList.contains('row-hidden') && r.dataset.run === run) { hasHidden = true; break; }
+            if (!r.classList.contains('row-hidden') || r.dataset.run !== run) break;
+            r = r.previousElementSibling;
+        }
+        if (!hasHidden) {
+            r = tr.nextElementSibling;
+            while (r) {
+                if (r.classList.contains('row-hidden') && r.dataset.run === run) { hasHidden = true; break; }
+                if (!r.classList.contains('row-hidden') || r.dataset.run !== run) break;
+                r = r.nextElementSibling;
+            }
+        }
+        tr.style.display = hasHidden ? '' : 'none';
+    });
+    if (ba) ba.disabled = false;
 }
 
 /* ---- F7 Manual alignment (Beyond Compare style) ---- */
@@ -1436,6 +1519,7 @@ def generate_html(records: list[LowerRecord], output_path: str):
             "      document.querySelectorAll('.pass-section table tr.row-hidden').forEach(function(r) {\n"
             "        r.classList.remove('row-hidden');\n"
             "      });\n"
+            "      document.querySelectorAll('.pass-section table').forEach(function(tbl) { updBtns(tbl); });\n"
             "    }\n"
             "\n"
             "    if (e.key === 'F7') {\n"

@@ -59,12 +59,16 @@ _original_pass_call: Callable | None = None
 _original_pipeline_lower: object | None = None
 _current_phase: str | None = None
 _pass_index: int = 0
-_records_offset: int = 0
 _auto_flush: bool = False
 _trace_dir: str | None = None
 _lock = threading.RLock()
 _run_counter: int = 0
 _atexit_registered: bool = False
+
+# Phase label used for passes that run outside any PassPipeline.lower window
+# (e.g. pre-pipeline module passes and tvm.build postproc), so they are still
+# captured by the global Pass.__call__ hook.
+_UNSCOPED_PHASE = "unscoped"
 
 
 def _get_mode() -> str | None:
@@ -144,12 +148,20 @@ def _incremental_flush_html():
 
 
 def _traced_pass_call(self, mod):
-    """Intercept all Pass.__call__ invocations to record before/after IR."""
+    """Intercept all Pass.__call__ invocations to record before/after IR.
+
+    Captures every pass invocation globally (matching pass_diff's hook),
+    including those outside any PassPipeline.lower window (pre-pipeline module
+    passes, tvm.build postproc).  Records are appended at runtime with the
+    pass's actual display name, eliminating the prior index-based pre-registration
+    that could drift when conditional passes (e.g. LetInline) were skipped.
+    """
     global _pass_index
 
-    if not _current_phase or not _is_trace_enabled():
+    if not _is_trace_enabled():
         return _original_pass_call(self, mod)
 
+    phase = _current_phase or _UNSCOPED_PHASE
     gen_html = _should_gen_html()
     if gen_html:
         _ensure_trace_dir()
@@ -158,17 +170,26 @@ def _traced_pass_call(self, mod):
     with _lock:
         idx = _pass_index
         _pass_index += 1
-        rec_idx = _records_offset + idx
 
     try:
         result = _original_pass_call(self, mod)
     except Exception as e:
         with _lock:
-            if gen_html and 0 <= rec_idx < len(_records):
-                rec = _records[rec_idx]
-                rec.status = STATUS_FAILED
-                rec.before_text = before_text
-                rec.error_msg = str(e)
+            record = LowerRecord(
+                phase=phase,
+                name=_get_pass_display_name(self),
+                index=idx,
+                before_text=before_text,
+                after_text="",
+                changed=False,
+                add_lines=0,
+                del_lines=0,
+                status=STATUS_FAILED,
+                error_msg=str(e),
+            )
+            _records.append(record)
+            _save_raw_files(record)
+            print(f"  [lower_trace] {phase}/{idx:02d}_{record.name}: FAILED ({e})")
         raise
 
     after_text = str(result)
@@ -189,43 +210,30 @@ def _traced_pass_call(self, mod):
                 del_count += i2 - i1
 
     with _lock:
-        if gen_html:
-            if 0 <= rec_idx < len(_records):
-                rec = _records[rec_idx]
-                rec.before_text = before_text
-                rec.after_text = after_text
-                rec.changed = changed
-                rec.add_lines = add_count
-                rec.del_lines = del_count
-                rec.status = STATUS_COMPLETED
-                _save_raw_files(rec)
-                tag = "CHANGED" if changed else "NO-OP"
-                print(f"  [lower_trace] {_current_phase}/{rec.index:02d}_{rec.name}: {tag}")
-            else:
-                record = LowerRecord(
-                    phase=_current_phase,
-                    name=pass_name,
-                    index=idx,
-                    before_text=before_text,
-                    after_text=after_text,
-                    changed=changed,
-                    add_lines=add_count,
-                    del_lines=del_count,
-                    status=STATUS_COMPLETED,
-                )
-                _records.append(record)
-                _save_raw_files(record)
-                tag = "CHANGED" if changed else "NO-OP"
-                print(f"  [lower_trace] {_current_phase}/{record.index:02d}_{pass_name}: {tag}")
+        record = LowerRecord(
+            phase=phase,
+            name=pass_name,
+            index=idx,
+            before_text=before_text,
+            after_text=after_text,
+            changed=changed,
+            add_lines=add_count,
+            del_lines=del_count,
+            status=STATUS_COMPLETED,
+        )
+        _records.append(record)
+        _save_raw_files(record)
+        tag = "CHANGED" if changed else "NO-OP"
+        print(f"  [lower_trace] {phase}/{idx:02d}_{pass_name}: {tag}")
 
-        if _auto_flush:
+        if gen_html:
             with contextlib.suppress(Exception):
                 _incremental_flush_html()
 
     if _should_print_terminal() and changed:
         from .diff import print_diff
 
-        label = f"{_current_phase}/{pass_name}"
+        label = f"{phase}/{pass_name}"
         print_diff(before_text, after_text, f"{label} (before)", f"{label} (after)")
 
     return result
@@ -409,13 +417,17 @@ def _discover_phases(lower_func) -> list:
 
 
 def _wrap_phase(original_func, phase_index, total_phases):
-    """Wrap a phase function to set tracing context."""
+    """Wrap a phase function to set tracing context (legacy architecture).
+
+    Phase context is set so that passes invoked within this window are tagged
+    with the phase label.  Pass records are appended at runtime by
+    ``_traced_pass_call``; no pre-registration is performed.
+    """
     base_phase_name = f"phase{phase_index}_{original_func.__name__}"
-    pass_names = _discover_passes(original_func)
 
     @functools.wraps(original_func)
     def wrapper(*args, **kwargs):
-        global _run_counter, _current_phase, _pass_index, _records_offset, _auto_flush
+        global _run_counter, _current_phase, _auto_flush
 
         with _lock:
             if phase_index == 1:
@@ -427,27 +439,7 @@ def _wrap_phase(original_func, phase_index, total_phases):
             phase_name = f"{run_prefix}{base_phase_name}"
 
             _current_phase = phase_name
-            _pass_index = 0
-            _records_offset = len(_records)
-
-            gen_html = _should_gen_html()
-
-            if gen_html and pass_names:
-                _ensure_trace_dir()
-                for i, name in enumerate(pass_names):
-                    _records.append(
-                        LowerRecord(
-                            phase=phase_name,
-                            name=name,
-                            index=i,
-                            before_text="",
-                            after_text="",
-                            changed=False,
-                            status=STATUS_SKIPPED,
-                        )
-                    )
-
-            _auto_flush = gen_html
+            _auto_flush = _should_gen_html()
 
         try:
             result = original_func(*args, **kwargs)
@@ -467,10 +459,7 @@ def _wrap_phase(original_func, phase_index, total_phases):
             _current_phase = None
 
             if phase_index == total_phases:
-                print(
-                    f"  [lower_trace] run {_run_counter} ({phase_name}) complete: "
-                    f"{len(_records)} total records"
-                )
+                print(f"  [lower_trace] run {_run_counter} ({phase_name}) complete: {len(_records)} total records")
 
         with contextlib.suppress(Exception):
             _incremental_flush_html()
@@ -481,8 +470,15 @@ def _wrap_phase(original_func, phase_index, total_phases):
 
 
 def _traced_pipeline_lower(self, mod, target):
-    """Intercept PassPipeline.lower to set phase context for pass tracing (new architecture)."""
-    global _run_counter, _current_phase, _pass_index, _records_offset, _auto_flush
+    """Intercept PassPipeline.lower to set phase context for pass tracing (new architecture).
+
+    Only sets ``_current_phase`` so that passes invoked within this window are
+    tagged with the pipeline label.  Pass records are appended at runtime by
+    ``_traced_pass_call``; no pre-registration is performed, so conditional
+    passes (e.g. LetInline) that are skipped at runtime simply do not appear,
+    matching the behaviour of ``pass_diff``.
+    """
+    global _run_counter, _current_phase, _auto_flush
 
     with _lock:
         _run_counter += 1
@@ -492,50 +488,24 @@ def _traced_pipeline_lower(self, mod, target):
         run_prefix = f"run{_run_counter}_" if _run_counter > 1 else ""
         phase_name = f"{run_prefix}pipeline_{self.name}"
         _current_phase = phase_name
-        _pass_index = 0
-        _records_offset = len(_records)
-
-        gen_html = _should_gen_html()
-
-        pass_names = _discover_passes_recursive(self._lower)
-        if gen_html and pass_names:
-            _ensure_trace_dir()
-            for i, name in enumerate(pass_names):
-                _records.append(
-                    LowerRecord(
-                        phase=phase_name,
-                        name=name,
-                        index=i,
-                        before_text="",
-                        after_text="",
-                        changed=False,
-                        status=STATUS_SKIPPED,
-                    )
-                )
-
-        _auto_flush = gen_html
+        _auto_flush = _should_gen_html()
 
     try:
         result = _original_pipeline_lower(self, mod, target)
     except Exception as e:
-        _auto_flush = False
-        _current_phase = None
-        print(f"  [lower_trace] EXCEPTION in {phase_name}: {e}")
-
-        rec_idx = _records_offset + _pass_index
-        if 0 <= rec_idx < len(_records):
-            rec = _records[rec_idx]
-            if rec.status == STATUS_SKIPPED:
-                rec.status = STATUS_FAILED
-                rec.error_msg = str(e)
+        with _lock:
+            _auto_flush = False
+            _current_phase = None
+            print(f"  [lower_trace] EXCEPTION in {phase_name}: {e}")
 
         with contextlib.suppress(Exception):
             _incremental_flush_html()
 
         raise
 
-    _auto_flush = False
-    _current_phase = None
+    with _lock:
+        _auto_flush = False
+        _current_phase = None
 
     with contextlib.suppress(Exception):
         _incremental_flush_html()
@@ -575,10 +545,7 @@ def patch():
 
         _original_pipeline_lower = PassPipeline.lower
         PassPipeline.lower = _traced_pipeline_lower
-        print(
-            "[lower_trace] IR pass tracing patched (PassPipeline architecture). "
-            "Set TILELANG_LOWER_TRACE=1 to enable."
-        )
+        print("[lower_trace] IR pass tracing patched (PassPipeline architecture). Set TILELANG_LOWER_TRACE=1 to enable.")
         return
     except ImportError:
         pass
@@ -661,11 +628,10 @@ def uninstall():
 
 def reset():
     """Clear collected records, section cache, and trace directory."""
-    global _records, _section_cache, _trace_dir, _current_phase, _pass_index, _records_offset, _auto_flush
+    global _records, _section_cache, _trace_dir, _current_phase, _pass_index, _auto_flush
     _records = []
     _section_cache = []
     _trace_dir = None
     _current_phase = None
     _pass_index = 0
-    _records_offset = 0
     _auto_flush = False

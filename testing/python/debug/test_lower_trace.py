@@ -212,5 +212,48 @@ def test_diff_html_line_numbers_monotone():
         assert nums == sorted(nums), f"{name} column line numbers not ascending: {nums}"
 
 
+def test_no_skipped_phantom_records(monkeypatch):
+    """Pre-registration is gone: no SKIPPED records, indices global-monotonic."""
+    from tilelang.tools.lower_trace import patch, uninstall
+    from tilelang.tools.lower_trace import core as _core
+    from tilelang.tools.lower_trace.core import STATUS_SKIPPED
+    from tilelang.backend.pass_pipeline import resolve_pipeline
+    import tilelang.language as T
+
+    monkeypatch.setenv("TILELANG_LOWER_TRACE", "both")
+    monkeypatch.setenv("TILELANG_LOWER_TRACE_DIR", tempfile.mkdtemp(prefix="lt_test_"))
+
+    uninstall()
+    patch()
+
+    @T.prim_func
+    def tiny(A: T.Tensor((32,), "float32"), B: T.Tensor((32,), "float32")):
+        with T.Kernel(32):
+            tid = T.get_thread_binding()
+            B[tid] = A[tid] + 1.0
+
+    mod = tvm.IRModule({"main": tiny})
+    target = tvm.target.Target("c")
+    pipeline = resolve_pipeline(target)
+    pipeline.lower(mod, target)
+
+    # No phantom/skipped records remain — every record is COMPLETED or FAILED
+    skipped = [r for r in _core._records if r.status == STATUS_SKIPPED]
+    assert not skipped, f"Found {len(skipped)} SKIPPED records (pre-registration not removed)"
+
+    # Indices are strictly increasing across all records (global-monotonic)
+    indices = [r.index for r in _core._records]
+    assert indices == sorted(indices), f"Indices not ascending: {indices}"
+    assert len(indices) == len(set(indices)), f"Duplicate indices: {indices}"
+
+    # No phantom LetInline slot when should_force_let_inline() is False
+    letinline = [r for r in _core._records if "LetInline" in r.name]
+    assert not letinline, f"Phantom LetInline records found: {letinline}"
+
+    uninstall()
+    monkeypatch.delenv("TILELANG_LOWER_TRACE", raising=False)
+    monkeypatch.delenv("TILELANG_LOWER_TRACE_DIR", raising=False)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
