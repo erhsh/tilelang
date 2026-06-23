@@ -3,6 +3,9 @@
 Monkey-patches ``tvm.ir.transform.Pass.__call__`` and ``PassPipeline.lower``
 to automatically capture IR before/after every pass and generate diff reports.
 
+This module has **no dependency on ``tilelang.env``**; configuration is read
+from ``os.environ`` directly, or passed programmatically via ``patch()``.
+
 Supports two architectures:
 - New: ``PassPipeline.lower`` (each backend registers a pipeline object)
 - Old: phase-based functions called from ``tilelang.engine.lower``
@@ -65,16 +68,34 @@ _lock = threading.RLock()
 _run_counter: int = 0
 _atexit_registered: bool = False
 
+_UNSET: object = object()
+_mode_override: str | None | object = _UNSET
+_trace_dir_override: str | None | object = _UNSET
+
 # Phase label used for passes that run outside any PassPipeline.lower window
 # (e.g. pre-pipeline module passes and tvm.build postproc), so they are still
 # captured by the global Pass.__call__ hook.
 _UNSCOPED_PHASE = "unscoped"
 
 
-def _get_mode() -> str | None:
-    from tilelang.env import env
+def _parse_lower_trace_mode(value: str | None) -> str | None:
+    """Parse a TILELANG_LOWER_TRACE-style value into a mode string."""
+    if value is None:
+        return None
+    v = value.lower().strip()
+    if v in ("", "0", "false", "no", "off"):
+        return None
+    if v in ("1", "true", "yes", "on"):
+        return "html"
+    if v in ("terminal", "html", "both"):
+        return v
+    return "html"
 
-    return env.get_lower_trace_mode()
+
+def _get_mode() -> str | None:
+    if _mode_override is not _UNSET:
+        return _mode_override  # type: ignore[return-value]
+    return _parse_lower_trace_mode(os.environ.get("TILELANG_LOWER_TRACE"))
 
 
 def _is_trace_enabled() -> bool:
@@ -98,10 +119,14 @@ def _ensure_trace_dir() -> str:
     if _trace_dir is not None:
         return _trace_dir
 
-    from tilelang.env import env
     from datetime import datetime
 
-    base_dir = str(env.TILELANG_LOWER_TRACE_DIR) or os.path.join(".", "tmp", "lower_trace_output")
+    base_dir = (
+        _trace_dir_override
+        if _trace_dir_override is not _UNSET and _trace_dir_override
+        else os.environ.get("TILELANG_LOWER_TRACE_DIR")
+        or os.path.join(".", "tmp", "lower_trace_output")
+    )
     script_name = os.path.splitext(os.path.basename(sys.argv[0]))[0] or "kernel"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     _trace_dir = os.path.join(base_dir, f"{script_name}_{timestamp}_{os.getpid()}")
@@ -526,8 +551,28 @@ def _register_atexit():
     _atexit_registered = True
 
 
-def patch():
-    """Activate IR pass tracing via monkey-patching."""
+def patch(*, mode=_UNSET, trace_dir=_UNSET):
+    """Activate IR pass tracing via monkey-patching.
+
+    Parameters
+    ----------
+    mode : str | None, optional
+        Force a trace mode (``'terminal'``, ``'html'``, ``'both'``, or
+        ``None`` to disable).  When omitted, the mode is read from the
+        ``TILELANG_LOWER_TRACE`` env var (or a prior ``patch`` override),
+        keeping this module free of any ``tilelang.env`` dependency.
+    trace_dir : str | None, optional
+        Force the trace output base directory.  When omitted, falls back to
+        the ``TILELANG_LOWER_TRACE_DIR`` env var, then
+        ``./tmp/lower_trace_output``.
+    """
+    global _mode_override, _trace_dir_override
+
+    if mode is not _UNSET:
+        _mode_override = _parse_lower_trace_mode(mode if mode is None else str(mode))
+    if trace_dir is not _UNSET:
+        _trace_dir_override = trace_dir if trace_dir is None else str(trace_dir)
+
     from tvm.ir.transform import Pass
 
     global _original_pass_call, _original_pipeline_lower, _atexit_registered
@@ -602,6 +647,7 @@ def _final_report():
 def uninstall():
     """Remove the pass tracing hook and restore original behavior."""
     global _original_pass_call, _original_pipeline_lower, _atexit_registered, _run_counter
+    global _mode_override, _trace_dir_override
 
     if _original_pass_call is not None:
         from tvm.ir.transform import Pass
@@ -615,6 +661,9 @@ def uninstall():
         PassPipeline.lower = _original_pipeline_lower
 
     _original_pipeline_lower = None
+
+    _mode_override = _UNSET
+    _trace_dir_override = _UNSET
 
     if _atexit_registered:
         import atexit
