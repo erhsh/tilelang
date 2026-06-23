@@ -149,7 +149,7 @@ def test_lower_trace_dark_theme():
 def test_multi_run_accumulation(monkeypatch):
     from tilelang.tools.lower_trace import patch, uninstall
     from tilelang.tools.lower_trace import core as _core
-    from tilelang.backend.pass_pipeline import PassPipeline, resolve_pipeline
+    from tilelang.backend.pass_pipeline import resolve_pipeline
     import tilelang.language as T
 
     monkeypatch.setenv("TILELANG_LOWER_TRACE", "both")
@@ -178,9 +178,7 @@ def test_multi_run_accumulation(monkeypatch):
     pipeline.lower(mod, target)
     total_count = len(_core._records)
     assert _core._run_counter == 2, f"Expected run_counter=2 after second run, got {_core._run_counter}"
-    assert total_count > run1_count, (
-        f"Second run should accumulate records: total={total_count}, run1={run1_count}"
-    )
+    assert total_count > run1_count, f"Second run should accumulate records: total={total_count}, run1={run1_count}"
 
     phases = {rec.phase for rec in _core._records}
     assert "pipeline_c" in phases, "First run should have phase 'pipeline_c'"
@@ -189,6 +187,29 @@ def test_multi_run_accumulation(monkeypatch):
     uninstall()
     monkeypatch.delenv("TILELANG_LOWER_TRACE", raising=False)
     monkeypatch.delenv("TILELANG_LOWER_TRACE_DIR", raising=False)
+
+
+def test_diff_html_line_numbers_monotone():
+    import re
+    from tilelang.tools.lower_trace.diff import _make_diff_html
+
+    # Whitespace-variant duplicates land inside a single replace hunk: top-level
+    # difflib (full-line) won't pre-match them as equal, but the strip-level
+    # pairing inside the hunk used to greedily pair a later left line to an
+    # earlier right line, making the right column render out of order.
+    before = "\n".join([" A", "A", " B"])
+    after = "\n".join(["C", "A ", "B"])
+    html = _make_diff_html(before, after, context=3)
+
+    left, right = [], []
+    for row in re.finditer(r"<tr[^>]*>(.*?)</tr>", html, re.S):
+        for side, txt in re.findall(r'<td class="ln[^"]*"\s+data-side="([lr])"[^>]*>(\d*)</td>', row.group(1)):
+            (left if side == "l" else right).append(int(txt) if txt.strip() else None)
+
+    assert left and right, f"no line-number cells parsed:\n{html}"
+    for name, col in (("left", left), ("right", right)):
+        nums = [n for n in col if n is not None]
+        assert nums == sorted(nums), f"{name} column line numbers not ascending: {nums}"
 
 
 if __name__ == "__main__":

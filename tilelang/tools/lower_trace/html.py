@@ -984,29 +984,42 @@ function buildDiffRowsHtml(opcodes, beforeLines, afterLines, pinL, pinR) {
                     '<td class="sg"></td><td class="eq">' + escHtml(afterLines[j]||'') + '</td></tr>');
             }
         } else if (op.tag === 'replace') {
-            var lLeft = op.i2 - op.i1, lRight = op.j2 - op.j1;
-            var pairs = [], usedL = {}, usedR = {};
-            for (var li = op.i1; li < op.i2; li++) {
-                for (var ri = op.j1; ri < op.j2; ri++) {
-                    if (usedR[ri]) continue;
-                    if ((beforeLines[li]||'').trim() === (afterLines[ri]||'').trim()) {
-                        pairs.push([li, ri, true]); usedL[li] = true; usedR[ri] = true; break;
-                    }
+            // Monotone matching: LCS on stripped content guarantees both
+            // line-number columns render in ascending order (no sort needed).
+            var bStripped = [], aStripped = [];
+            for (var x = op.i1; x < op.i2; x++) bStripped.push((beforeLines[x]||'').trim());
+            for (var y = op.j1; y < op.j2; y++) aStripped.push((afterLines[y]||'').trim());
+            var subOps = lcsOpcodes(bStripped, aStripped, op.i1, op.j1);
+            var matched = [];
+            for (var k = 0; k < subOps.length; k++) {
+                var so = subOps[k];
+                if (so.tag === 'equal') {
+                    for (var t = 0; t < so.i2 - so.i1; t++) matched.push([so.i1 + t, so.j1 + t]);
                 }
             }
-            var remL = [], remR = [];
-            for (var k = op.i1; k < op.i2; k++) { if (!usedL[k]) remL.push(k); }
-            for (var k = op.j1; k < op.j2; k++) { if (!usedR[k]) remR.push(k); }
-            var all = pairs.slice();
-            for (var k = 0; k < Math.max(remL.length, remR.length); k++) {
-                if (k < remL.length && k < remR.length) all.push([remL[k], remR[k], false]);
-                else if (k < remL.length) all.push([remL[k], null, false]);
-                else all.push([null, remR[k], false]);
+            var mL = {}, mR = {};
+            for (var k = 0; k < matched.length; k++) { mL[matched[k][0]] = true; mR[matched[k][1]] = true; }
+            var unmatchedL = [], unmatchedR = [];
+            for (var k = op.i1; k < op.i2; k++) { if (!mL[k]) unmatchedL.push(k); }
+            for (var k = op.j1; k < op.j2; k++) { if (!mR[k]) unmatchedR.push(k); }
+            var all = [];
+            var up = 0, vp = 0;
+            var flushGap = function(gl, gr) {
+                for (var k = 0; k < Math.max(gl.length, gr.length); k++) {
+                    if (k < gl.length && k < gr.length) all.push([gl[k], gr[k], false]);
+                    else if (k < gl.length) all.push([gl[k], null, false]);
+                    else all.push([null, gr[k], false]);
+                }
+            };
+            for (var mi = 0; mi < matched.length; mi++) {
+                var li = matched[mi][0], ri = matched[mi][1];
+                var gl = [], gr = [];
+                while (up < unmatchedL.length && unmatchedL[up] < li) { gl.push(unmatchedL[up]); up++; }
+                while (vp < unmatchedR.length && unmatchedR[vp] < ri) { gr.push(unmatchedR[vp]); vp++; }
+                flushGap(gl, gr);
+                all.push([li, ri, true]);
             }
-            all.sort(function(a,b) {
-                var la = a[0]!==null ? a[0] : a[1], lb = b[0]!==null ? b[0] : b[1];
-                return la - lb;
-            });
+            flushGap(unmatchedL.slice(up), unmatchedR.slice(vp));
             for (var k = 0; k < all.length; k++) {
                 var li = all[k][0], ri = all[k][1], matched = all[k][2];
                 var isPinned = (li === pinL && ri === pinR);
@@ -1286,7 +1299,9 @@ def generate_html(records: list[LowerRecord], output_path: str):
         active_cls = " active" if is_active else ""
         active_style = "" if is_active else ' style="display:none"'
 
-        pretty_phase = phase_name.replace("_", " ").replace("phase1", "Phase 1:").replace("phase2", "Phase 2:").replace("pipeline", "Pipeline:")
+        pretty_phase = (
+            phase_name.replace("_", " ").replace("phase1", "Phase 1:").replace("phase2", "Phase 2:").replace("pipeline", "Pipeline:")
+        )
         pretty_phase = pretty_phase.strip()
         if pretty_phase and pretty_phase[0].islower():
             pretty_phase = pretty_phase[0].upper() + pretty_phase[1:]

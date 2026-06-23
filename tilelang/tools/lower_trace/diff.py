@@ -145,6 +145,22 @@ def _merge_whitespace_diffs(opcodes: list, before_lines: list, after_lines: list
     return result
 
 
+def _flush_gap_rows(target: list, gap_l: list, gap_r: list) -> None:
+    """Append position-paired rows for unmatched left/right lines within a gap.
+
+    Pairs ``gap_l[k]`` with ``gap_r[k]`` for inline diff rendering; leftovers
+    become single-side rows. Both lists are ascending, so the appended rows keep
+    the left and right columns ascending.
+    """
+    for k in range(max(len(gap_l), len(gap_r))):
+        if k < len(gap_l) and k < len(gap_r):
+            target.append((gap_l[k], gap_r[k], False))
+        elif k < len(gap_l):
+            target.append((gap_l[k], None, False))
+        else:
+            target.append((None, gap_r[k], False))
+
+
 def _make_diff_html(before_text: str, after_text: str, context: int = 3) -> str:
     """Generate a GitHub-style side-by-side diff HTML table."""
     before_lines = before_text.splitlines()
@@ -191,49 +207,40 @@ def _make_diff_html(before_text: str, after_text: str, context: int = 3) -> str:
                     f'<td class="sg"></td><td class="eq">{_esc(after_lines[j])}</td></tr>'
                 )
         elif tag == "replace":
-            left_indices = list(range(i1, i2))
-            right_indices = list(range(j1, j2))
+            # Monotone matching: LCS on stripped content guarantees both the
+            # left and right line-number columns render in ascending order.
+            # Greedy bipartite matching + sort could pair a later left line to
+            # an earlier right line, making the right column jump backwards.
+            before_stripped = [before_lines[i].strip() for i in range(i1, i2)]
+            after_stripped = [after_lines[j].strip() for j in range(j1, j2)]
+            inner = difflib.SequenceMatcher(None, before_stripped, after_stripped)
+            matched: list[tuple[int, int]] = []
+            for t2, a1, a2, b1, _b2 in inner.get_opcodes():
+                if t2 == "equal":
+                    for k in range(a2 - a1):
+                        matched.append((i1 + a1 + k, j1 + b1 + k))
 
-            pairs = []
-            used_left = set()
-            used_right = set()
+            matched_left = {li for li, _ in matched}
+            matched_right = {ri for _, ri in matched}
+            unmatched_left = [i for i in range(i1, i2) if i not in matched_left]
+            unmatched_right = [j for j in range(j1, j2) if j not in matched_right]
 
-            for li in left_indices:
-                for ri in right_indices:
-                    if ri in used_right:
-                        continue
-                    if before_lines[li].strip() == after_lines[ri].strip():
-                        pairs.append((li, ri))
-                        used_left.add(li)
-                        used_right.add(ri)
-                        break
+            all_rows: list = []
+            up = vp = 0
 
-            remaining_left = [i for i in left_indices if i not in used_left]
-            remaining_right = [j for j in right_indices if j not in used_right]
-
-            all_rows = []
-
-            for li, ri in pairs:
+            for li, ri in matched:
+                gap_l = []
+                while up < len(unmatched_left) and unmatched_left[up] < li:
+                    gap_l.append(unmatched_left[up])
+                    up += 1
+                gap_r = []
+                while vp < len(unmatched_right) and unmatched_right[vp] < ri:
+                    gap_r.append(unmatched_right[vp])
+                    vp += 1
+                _flush_gap_rows(all_rows, gap_l, gap_r)
                 all_rows.append((li, ri, True))
 
-            for k in range(max(len(remaining_left), len(remaining_right))):
-                if k < len(remaining_left) and k < len(remaining_right):
-                    all_rows.append((remaining_left[k], remaining_right[k], False))
-                elif k < len(remaining_left):
-                    all_rows.append((remaining_left[k], None, False))
-                else:
-                    all_rows.append((None, remaining_right[k], False))
-
-            def sort_key(row):
-                li, ri, _ = row
-                if li is not None and ri is not None:
-                    return min(li * 1000, ri * 1000)
-                elif li is not None:
-                    return li * 1000
-                else:
-                    return ri * 1000
-
-            all_rows.sort(key=sort_key)
+            _flush_gap_rows(all_rows, unmatched_left[up:], unmatched_right[vp:])
 
             for li, ri, is_matched in all_rows:
                 if li is not None and ri is not None:
@@ -308,13 +315,15 @@ def unified_diff(
     before_lines = before_text.splitlines(keepends=True)
     after_lines = after_text.splitlines(keepends=True)
 
-    diff = list(difflib.unified_diff(
-        before_lines,
-        after_lines,
-        fromfile=before_label,
-        tofile=after_label,
-        n=context,
-    ))
+    diff = list(
+        difflib.unified_diff(
+            before_lines,
+            after_lines,
+            fromfile=before_label,
+            tofile=after_label,
+            n=context,
+        )
+    )
 
     if not diff:
         return ""
