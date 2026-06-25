@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 STATUS_SKIPPED = "skipped"
+STATUS_CODEGEN = "codegen"
 
 
 @dataclass
@@ -60,6 +61,23 @@ _records: list[LowerRecord] = []
 _section_cache: list[str] = []
 _original_pass_call: Callable | None = None
 _original_pipeline_lower: object | None = None
+_original_codegen_ffis: dict[str, Callable] = {}
+
+_CODEGEN_FFI_NAMES: list[str] = [
+    "target.build.tilelang_cuda",
+    "target.build.tilelang_cuda_without_compile",
+    "target.build.tilelang_cutedsl",
+    "target.build.tilelang_cutedsl_without_compile",
+    "target.build.tilelang_hip",
+    "target.build.tilelang_hip_without_compile",
+    "target.build.tilelang_metal",
+    "target.build.tilelang_c",
+    "target.build.tilelang_c_host",
+    "target.build.tilelang_ascend",
+    "target.build.tilelang_ascend_pto",
+    "target.build.llvm",
+    "target.build.webgpu",
+]
 _current_phase: str | None = None
 _pass_index: int = 0
 _auto_flush: bool = False
@@ -136,15 +154,21 @@ def _ensure_trace_dir() -> str:
 
 
 def _save_raw_files(record: LowerRecord):
-    """Write before/after .tir files to disk (phase subdirectory layout)."""
+    """Write before/after files to disk (phase subdirectory layout).
+
+    For codegen records the *after* text is C++ source, so we write ``*.cpp``
+    instead of ``*.tir``.
+    """
     trace_dir = _ensure_trace_dir()
     phase_dir = os.path.join(trace_dir, record.phase)
     os.makedirs(phase_dir, exist_ok=True)
 
     prefix = f"{record.index:02d}_{record.name}"
-    with open(os.path.join(phase_dir, f"{prefix}_before.tir"), "w") as f:
+    before_ext = ".tir"
+    after_ext = ".cpp" if record.status == STATUS_CODEGEN else ".tir"
+    with open(os.path.join(phase_dir, f"{prefix}_before{before_ext}"), "w") as f:
         f.write(record.before_text)
-    with open(os.path.join(phase_dir, f"{prefix}_after.tir"), "w") as f:
+    with open(os.path.join(phase_dir, f"{prefix}_after{after_ext}"), "w") as f:
         f.write(record.after_text)
 
 
@@ -540,6 +564,101 @@ def _traced_pipeline_lower(self, mod, target):
     return result
 
 
+def _wrap_codegen_ffi(original_build):
+    """Return a wrapper around a codegen FFI build function (``target.build.*``).
+
+    The wrapper:
+    1. Captures the final lowered TIR right before codegen runs (``str(mod)``).
+    2. Temporarily sets ``_current_phase = 'codegen'`` so that the internal
+       ``tir.transform.Simplify()`` call in ``device_codegen`` is automatically
+       attributed to the ``codegen`` phase.
+    3. After codegen finishes, captures the generated source via
+       ``result.get_source()`` and appends a ``STATUS_CODEGEN`` record.
+    """
+
+    @functools.wraps(original_build)
+    def wrapper(*args, **kwargs):
+        global _pass_index, _current_phase
+
+        if not _is_trace_enabled():
+            return original_build(*args, **kwargs)
+
+        mod = args[0] if args else kwargs.get("mod")
+        gen_html = _should_gen_html()
+        if gen_html:
+            _ensure_trace_dir()
+
+        before_text = str(mod)
+
+        with _lock:
+            idx = _pass_index
+            _pass_index += 1
+            _current_phase = "codegen"
+
+        try:
+            result = original_build(*args, **kwargs)
+        except Exception as e:
+            with _lock:
+                record = LowerRecord(
+                    phase="codegen",
+                    name=getattr(original_build, "__name__", "codegen"),
+                    index=idx,
+                    before_text=before_text,
+                    after_text="",
+                    changed=False,
+                    status=STATUS_FAILED,
+                    error_msg=str(e),
+                )
+                _records.append(record)
+                _save_raw_files(record)
+                _current_phase = None
+                print(f"  [lower_trace] codegen/{idx:02d}_codegen: FAILED ({e})")
+            raise
+
+        after_text = result.inspect_source()
+
+        sm = difflib.SequenceMatcher(None, before_text.splitlines(), after_text.splitlines())
+        add_count = del_count = 0
+        for _tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if _tag == "insert":
+                add_count += j2 - j1
+            elif _tag == "delete":
+                del_count += i2 - i1
+            elif _tag == "replace":
+                add_count += j2 - j1
+                del_count += i2 - i1
+
+        with _lock:
+            record = LowerRecord(
+                phase="codegen",
+                name="codegen",
+                index=idx,
+                before_text=before_text,
+                after_text=after_text,
+                changed=True,
+                add_lines=add_count,
+                del_lines=del_count,
+                status=STATUS_CODEGEN,
+            )
+            _records.append(record)
+            _save_raw_files(record)
+            tag = "CODEGEN"
+            print(f"  [lower_trace] codegen/{idx:02d}_codegen: {tag} (+{add_count}/−{del_count})")
+            _current_phase = None
+
+            if gen_html:
+                with contextlib.suppress(Exception):
+                    _incremental_flush_html()
+
+        if _should_print_terminal():
+            from .diff import print_diff
+            print_diff(before_text, after_text, "codegen (TIR before)", "codegen (C++ after)")
+
+        return result
+
+    return wrapper
+
+
 def _register_atexit():
     """Register the final-report atexit handler (idempotent)."""
     global _atexit_registered
@@ -579,6 +698,20 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET):
     if _original_pass_call is None:
         _original_pass_call = Pass.__call__
         Pass.__call__ = _traced_pass_call
+
+    if not _original_codegen_ffis:
+        import tvm.ffi
+
+        for ffi_name in _CODEGEN_FFI_NAMES:
+            try:
+                orig = tvm.ffi.get_global_func(ffi_name)
+                if orig is not None:
+                    wrapped = _wrap_codegen_ffi(orig)
+                    wrapped._original_ffi_name = ffi_name
+                    _original_codegen_ffis[ffi_name] = orig
+                    tvm.ffi.register_global_func(ffi_name, wrapped, override=True)
+            except Exception:
+                pass
 
     _register_atexit()
 
@@ -661,6 +794,15 @@ def uninstall():
         PassPipeline.lower = _original_pipeline_lower
 
     _original_pipeline_lower = None
+
+    import tvm.ffi
+
+    for ffi_name, orig in _original_codegen_ffis.items():
+        try:
+            tvm.ffi.register_global_func(ffi_name, orig, override=True)
+        except Exception:
+            pass
+    _original_codegen_ffis.clear()
 
     _mode_override = _UNSET
     _trace_dir_override = _UNSET

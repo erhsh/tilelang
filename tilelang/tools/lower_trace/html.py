@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from .core import LowerRecord, STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED
+from .core import LowerRecord, STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED, STATUS_CODEGEN
 from .diff import _esc, _make_diff_html
 
 
@@ -232,6 +232,11 @@ body {
     font-weight: 700; font-size: 12px;
     padding: 3px 12px;
 }
+.badge-codegen {
+    background: var(--purple-bg); color: var(--purple-text);
+    font-weight: 700; font-size: 12px;
+    padding: 3px 12px;
+}
 @keyframes badgePulse {
     0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); }
     50% { box-shadow: 0 0 0 4px rgba(220, 38, 38, 0); }
@@ -368,6 +373,11 @@ body {
     border: 2px solid var(--amber);
     width: 10px; height: 10px;
 }
+.pass-dot.codegen {
+    background: var(--accent-blue);
+    width: 10px; height: 10px;
+    box-shadow: 0 0 0 2px rgba(37,99,235,0.2), 0 0 6px rgba(37,99,235,0.4);
+}
 @keyframes dotPulse {
     0%, 100% { box-shadow: 0 0 0 2px var(--red-bg-bright), 0 0 6px rgba(220,38,38,0.5); }
     50% { box-shadow: 0 0 0 4px var(--red-bg-bright), 0 0 10px rgba(220,38,38,0.3); }
@@ -472,6 +482,46 @@ body {
     background: var(--amber); color: #fff;
     font-size: 12px; padding: 3px 14px;
     border-radius: 10px;
+}
+.status-codegen {
+    background: var(--purple-bg); color: var(--purple-text);
+    font-size: 11px; padding: 2px 10px;
+    border-radius: 10px;
+    border: 1px solid var(--purple-text-light, var(--accent-blue));
+}
+
+.pass-section.codegen-section {
+    border-left: 4px solid var(--purple-text, var(--accent-blue));
+}
+
+.codegen-lang-label {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-bottom: 6px;
+}
+.codegen-lang-label.tir  { background: var(--purple-bg-light, var(--bg-inset)); color: var(--purple-text, var(--text-dim)); }
+.codegen-lang-label.cpp  { background: var(--bg-active, var(--bg-inset)); color: var(--accent-blue, var(--text-dim)); }
+
+.codegen-lang-bar {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    margin-bottom: 8px;
+    padding: 4px 8px;
+    background: var(--bg-inset, var(--bg-elevated));
+    border-radius: 4px;
+    font-size: 11px;
+}
+.codegen-lang-bar::before {
+    content: "▸";
+    color: var(--text-faint);
+    margin-right: 4px;
+    font-size: 10px;
 }
 
 .error-box {
@@ -1314,6 +1364,38 @@ def render_pass_section(rec: LowerRecord) -> str:
 
     elif rec.changed:
         diff_html = _make_diff_html(rec.before_text, rec.after_text, context=3)
+        if rec.status == STATUS_CODEGEN:
+            lang_labels = (
+                '<div class="codegen-lang-bar">'
+                '<span class="codegen-lang-label tir">Lowered TIR</span>'
+                '<span class="codegen-lang-label cpp">Generated C++</span>'
+                '</div>'
+            )
+            diff_content = (
+                f'<div class="diff-toolbar">'
+                f'<button class="btn-expand-all" '
+                f'onclick="expandAll(this)">⊞ Show all context</button>'
+                f'<button onclick="collapseCtx(this)">⊟ Collapse</button>'
+                f'<span class="copy-spacer"></span>'
+                f'<button class="btn-copy" onclick="copyIr(this,\'before\')">📋 Copy TIR</button>'
+                f'<button class="btn-copy" onclick="copyIr(this,\'after\')">📋 Copy C++</button>'
+                f"</div>"
+                f"{lang_labels}"
+                f"{diff_html}"
+            )
+            status_html = '<span class="status status-codegen">CODEGEN</span>'
+            return (
+                f'<div class="pass-section codegen-section" id="{sid}">'
+                f'<div class="pass-header collapsible" onclick="toggleCollapse(this)">'
+                f'<span class="pass-toggle"></span>'
+                f"<h2>{rec.index:02d}. {rec.name}</h2>"
+                f"{status_html}"
+                f"</div>"
+                f"{diff_content}"
+                f'<pre hidden class="ir-data-before">{_esc(rec.before_text)}</pre>\n'
+                f'<pre hidden class="ir-data-after">{_esc(rec.after_text)}</pre>\n'
+                f"</div>"
+            )
         diff_content = (
             f'<div class="diff-toolbar">'
             f'<button class="btn-expand-all" '
@@ -1383,7 +1465,11 @@ def generate_html(records: list[LowerRecord], output_path: str):
         active_style = "" if is_active else ' style="display:none"'
 
         pretty_phase = (
-            phase_name.replace("_", " ").replace("phase1", "Phase 1:").replace("phase2", "Phase 2:").replace("pipeline", "Pipeline:")
+            phase_name.replace("_", " ")
+            .replace("phase1", "Phase 1:")
+            .replace("phase2", "Phase 2:")
+            .replace("pipeline", "Pipeline:")
+            .replace("codegen", "Codegen")
         )
         pretty_phase = pretty_phase.strip()
         if pretty_phase and pretty_phase[0].islower():
@@ -1391,7 +1477,8 @@ def generate_html(records: list[LowerRecord], output_path: str):
 
         n_total = len(phase_records)
         n_completed = sum(1 for r in phase_records if r.status == STATUS_COMPLETED)
-        n_changed = sum(1 for r in phase_records if r.changed)
+        n_changed = sum(1 for r in phase_records if r.changed and r.status != STATUS_CODEGEN)
+        n_codegen = sum(1 for r in phase_records if r.status == STATUS_CODEGEN)
         n_failed = sum(1 for r in phase_records if r.status == STATUS_FAILED)
         n_skipped = sum(1 for r in phase_records if r.status == STATUS_SKIPPED)
         n_noop = n_completed - n_changed
@@ -1400,17 +1487,23 @@ def generate_html(records: list[LowerRecord], output_path: str):
 
         failed_badge = ""
         skipped_badge = ""
+        codegen_badge = ""
         if n_failed:
             failed_badge = f'<span class="badge badge-failed" data-filter="failed" onclick="filterByBadge(this)">✘ {n_failed} failed</span>'
         if n_skipped:
             skipped_badge = (
                 f'<span class="badge badge-skipped" data-filter="skipped" onclick="filterByBadge(this)">— {n_skipped} skipped</span>'
             )
+        if n_codegen and n_codegen < n_total:
+            codegen_badge = (
+                f'<span class="badge badge-codegen" data-filter="codegen" onclick="filterByBadge(this)">{n_codegen} codegen</span>'
+            )
         summaries_html.append(
             f'<div class="summary-bar" id="sm-{phase_name}"{active_style}>'
             f'<span class="badge badge-total" data-filter="all" onclick="filterByBadge(this)">{n_total} passes</span>'
             f'<span class="badge badge-changed" data-filter="changed" onclick="filterByBadge(this)">{n_changed} changed</span>'
             f'<span class="badge badge-noop" data-filter="noop" onclick="filterByBadge(this)">{n_noop} no-op</span>'
+            f"{codegen_badge}"
             f"{failed_badge}"
             f"{skipped_badge}"
             f"</div>"
@@ -1424,6 +1517,9 @@ def generate_html(records: list[LowerRecord], output_path: str):
             elif rec.status == STATUS_SKIPPED:
                 dot_cls = "skipped"
                 status_attr = "skipped"
+            elif rec.status == STATUS_CODEGEN:
+                dot_cls = "codegen"
+                status_attr = "codegen"
             elif rec.changed:
                 dot_cls = "changed"
                 status_attr = "changed"

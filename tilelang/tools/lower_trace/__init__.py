@@ -19,7 +19,7 @@ Programmatic API::
 
 from __future__ import annotations
 
-from .core import patch, uninstall, reset, LowerRecord, STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED
+from .core import patch, uninstall, reset, LowerRecord, STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED, STATUS_CODEGEN
 
 __all__ = [
     "patch",
@@ -30,6 +30,7 @@ __all__ = [
     "STATUS_COMPLETED",
     "STATUS_FAILED",
     "STATUS_SKIPPED",
+    "STATUS_CODEGEN",
 ]
 
 
@@ -93,7 +94,8 @@ def lower_trace(
         after_script = mod.script()
 
         diff_text = unified_diff(
-            before_script, after_script,
+            before_script,
+            after_script,
             before_label=f"step {step_idx} before",
             after_label=f"step {step_idx} after",
             context=context,
@@ -117,11 +119,12 @@ def lower_trace(
         results.append(step_result)
 
         if mode in ("terminal", "both"):
-            header = f"\n{'='*60}\n  Pass {step_idx}: {name}\n{'='*60}\n"
+            header = f"\n{'=' * 60}\n  Pass {step_idx}: {name}\n{'=' * 60}\n"
             print(header)
             if changed:
                 colored = unified_diff(
-                    before_script, after_script,
+                    before_script,
+                    after_script,
                     before_label=f"step {step_idx} before",
                     after_label=f"step {step_idx} after",
                     context=context,
@@ -138,16 +141,18 @@ def lower_trace(
         records = []
         for i, r in enumerate(results):
             changed = r["changed"]
-            records.append(LowerRecord(
-                phase="lower_trace",
-                name=r["name"],
-                index=i,
-                before_text=r["before_script"],
-                after_text=r["after_script"],
-                changed=changed,
-                add_lines=r["insertions"],
-                del_lines=r["deletions"],
-            ))
+            records.append(
+                LowerRecord(
+                    phase="lower_trace",
+                    name=r["name"],
+                    index=i,
+                    before_text=r["before_script"],
+                    after_text=r["after_script"],
+                    changed=changed,
+                    add_lines=r["insertions"],
+                    del_lines=r["deletions"],
+                )
+            )
         generate_html(records, html_path)
         print(f"\nHTML report written to: {html_path}")
 
