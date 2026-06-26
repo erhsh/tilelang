@@ -341,12 +341,6 @@ class Environment:
     TILELANG_DEFAULT_EXECUTION_BACKEND = EnvVar("TILELANG_EXECUTION_BACKEND", "auto")
     TILELANG_DEFAULT_VERBOSE = EnvVar("TILELANG_VERBOSE", "0")
 
-    # Lower trace debugging
-    TL_LOWER_TRACE = EnvVar("TL_LOWER_TRACE", "0")
-    TL_LOWER_TRACE_DIR = EnvVar(
-        "TL_LOWER_TRACE_DIR", "./tmp/lower_trace_output"
-    )
-
     # TVM integration
     SKIP_LOADING_TILELANG_SO = EnvVar("SKIP_LOADING_TILELANG_SO", "0")
     TVM_IMPORT_PYTHON_PATH = EnvVar("TVM_IMPORT_PYTHON_PATH", None)
@@ -423,17 +417,6 @@ class Environment:
     def get_default_verbose(self) -> bool:
         """Get default verbose flag from environment."""
         return self.TILELANG_DEFAULT_VERBOSE.lower() in ("1", "true", "yes", "on")
-
-    def get_lower_trace_mode(self) -> str | None:
-        """Return lower trace mode: None (off), 'terminal', 'html', or 'both'."""
-        value = str(self.TL_LOWER_TRACE).lower().strip()
-        if value in ("", "0", "false", "no", "off"):
-            return None
-        if value in ("1", "true", "yes", "on"):
-            return "html"
-        if value in ("terminal", "html", "both"):
-            return value
-        return "html"
 
     def is_running_autodd(self) -> bool:
         """Return True if we are running under `python -m tilelang.autodd`."""

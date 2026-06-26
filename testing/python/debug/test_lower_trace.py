@@ -9,16 +9,18 @@ import tilelang
 import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm
-from tilelang.env import env
+from tilelang.tools.lower_trace import core as _core
 
 
 @pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch):
     monkeypatch.delenv("TL_LOWER_TRACE", raising=False)
     monkeypatch.delenv("TL_LOWER_TRACE_DIR", raising=False)
+    monkeypatch.setattr(_core, "_mode_override", _core._UNSET)
     yield
     monkeypatch.delenv("TL_LOWER_TRACE", raising=False)
     monkeypatch.delenv("TL_LOWER_TRACE_DIR", raising=False)
+    monkeypatch.setattr(_core, "_mode_override", _core._UNSET)
 
 
 def _simple_program():
@@ -36,30 +38,30 @@ def _noop_pass():
 
 
 def test_env_default_off():
-    assert env.get_lower_trace_mode() is None
+    assert _core._get_mode() is None
 
 
 def test_env_off_values(monkeypatch):
     for v in ("0", "off", "false", "no", ""):
         monkeypatch.setenv("TL_LOWER_TRACE", v)
-        assert env.get_lower_trace_mode() is None, f"Expected None for {v!r}"
+        assert _core._get_mode() is None, f"Expected None for {v!r}"
 
 
 def test_env_truthy_maps_to_html(monkeypatch):
     for v in ("1", "on", "true", "yes"):
         monkeypatch.setenv("TL_LOWER_TRACE", v)
-        assert env.get_lower_trace_mode() == "html", f"Expected 'html' for {v!r}"
+        assert _core._get_mode() == "html", f"Expected 'html' for {v!r}"
 
 
 def test_env_explicit_modes(monkeypatch):
     monkeypatch.setenv("TL_LOWER_TRACE", "terminal")
-    assert env.get_lower_trace_mode() == "terminal"
+    assert _core._get_mode() == "terminal"
 
     monkeypatch.setenv("TL_LOWER_TRACE", "html")
-    assert env.get_lower_trace_mode() == "html"
+    assert _core._get_mode() == "html"
 
     monkeypatch.setenv("TL_LOWER_TRACE", "both")
-    assert env.get_lower_trace_mode() == "both"
+    assert _core._get_mode() == "both"
 
 
 def test_lower_trace_api_single_pass(capsys):

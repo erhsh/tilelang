@@ -124,6 +124,17 @@ def _disable_rocm_tvm_ffi_torch_c_dlpack(torch_module):
     _optional_torch_c_dlpack.load_torch_c_dlpack_extension = _disabled_torch_c_dlpack_extension
 
 
+def _is_lower_trace_enabled() -> bool:
+    """Check whether lower trace is enabled (reads TL_LOWER_TRACE env var)."""
+    value = os.environ.get("TL_LOWER_TRACE")
+    if value is None:
+        return False
+    v = value.lower().strip()
+    if v in ("", "0", "false", "no", "off"):
+        return False
+    return True
+
+
 @contextlib.contextmanager
 def _lazy_load_lib():
     import torch  # preload torch to avoid dlopen errors
@@ -214,11 +225,11 @@ if not env.is_light_import():
     from . import rocm as rocm  # noqa: F401
     from . import metal as metal  # noqa: F401
 
-    if env.get_lower_trace_mode() is not None:
+    if _is_lower_trace_enabled():
         from .tools.lower_trace import patch as _lower_trace_patch
 
         _lower_trace_patch()
-
+    del _is_lower_trace_enabled
 del _lazy_load_lib
 
 # Install pass diff hook if TILELANG_PASS_DIFF is enabled (zero overhead when off)

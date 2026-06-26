@@ -30,7 +30,6 @@ tilelang/tools/lower_trace/
 
 testing/python/debug/test_lower_trace.py  # 最小集成测试
 tilelang/__init__.py                       # 集成 patch()
-tilelang/env.py                            # 新增 EnvVar + get_lower_trace_mode()
 docs/tutorials/debug_tools_for_tilelang.md # 更新文档
 ```
 
@@ -120,19 +119,9 @@ _lock = threading.RLock()
 ## 7. Env 配置
 
 ```python
-# tilelang/env.py
-TL_LOWER_TRACE = EnvVar("TL_LOWER_TRACE", "0")
-TL_LOWER_TRACE_DIR = EnvVar("TL_LOWER_TRACE_DIR", "tmp/lower_trace_output")
-
-def get_lower_trace_mode(self) -> str | None:
-    value = str(self.TL_LOWER_TRACE).lower().strip()
-    if value in ("0", "false", "no", "off", ""):
-        return None
-    if value in ("1", "true", "yes", "on", "html"):
-        return "html"
-    if value in ("terminal", "both"):
-        return value
-    return "html"  # fallback
+# tilelang/tools/lower_trace/core.py — 直接读取 os.environ，不依赖 tilelang.env
+TL_LOWER_TRACE       # 模式: 1/html/terminal/both, 0/off 关闭
+TL_LOWER_TRACE_DIR   # 输出根目录, 默认 ./tmp/lower_trace_output
 ```
 
 ---
@@ -231,10 +220,11 @@ def _incremental_flush_html():
 if not env.is_light_import():
     ...  # existing backend imports
 
-    if env.get_lower_trace_mode() is not None:
+    if _is_lower_trace_enabled():  # 直接读 os.environ["TL_LOWER_TRACE"]
         from .tools.lower_trace import patch as _lower_trace_patch
         _lower_trace_patch()
         del _lower_trace_patch
+    del _is_lower_trace_enabled
 ```
 
 ---
