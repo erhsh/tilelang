@@ -26,6 +26,7 @@ import dis
 import functools
 import inspect
 import os
+import shutil
 import sys
 import threading
 from dataclasses import dataclass
@@ -73,6 +74,7 @@ _section_cache: list[str] = []
 _original_pass_call: Callable | None = None
 _original_pipeline_lower: object | None = None
 _original_codegen_ffis: dict[str, Callable] = {}
+_legacy_patched: bool = False
 
 _CODEGEN_FFI_NAMES: list[str] = [
     "target.build.tilelang_cuda",
@@ -301,7 +303,7 @@ def _traced_pass_call(self, mod):
             )
             _records.append(record)
             _save_raw_files(record)
-            print(f"  [lower_trace] {phase}/{idx:02d}_{record.name}: FAILED ({e})")
+            print(f"  {_ANSI_RED}[lower_trace] {phase}/{idx:02d}_{record.name}: FAILED ({e}){_ANSI_RESET}")
         raise
 
     after_text = str(result)
@@ -336,7 +338,8 @@ def _traced_pass_call(self, mod):
         _records.append(record)
         _save_raw_files(record)
         tag = "CHANGED" if changed else "NO-OP"
-        print(f"  [lower_trace] {phase}/{idx:02d}_{pass_name}: {tag}")
+        tag_color = _ANSI_GREEN if changed else _ANSI_DIM
+        print(f"  [lower_trace] {phase}/{idx:02d}_{pass_name}: {tag_color}{tag}{_ANSI_RESET}")
 
         if gen_html:
             with contextlib.suppress(Exception):
@@ -734,9 +737,11 @@ def _wrap_codegen_ffi(original_build):
                 with open(latest_path, "w") as _f:
                     _f.write(codegen_text)
                 if not os.path.isfile(codegen_out_path) or not os.path.isfile(original_path):
+                    if os.path.isfile(codegen_out_path):
+                        shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
+                        print(f"  {_ANSI_BOLD}{_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_codegen: INIT-BACKUP — {codegen_out_path} existed without baseline, backed up to {codegen_out_path}.bak{_ANSI_RESET}")
                     with open(original_path, "w") as _f:
                         _f.write(codegen_text)
-                    import shutil
                     shutil.copyfile(original_path, codegen_out_path)
                     print(f"  {_ANSI_GREEN}[lower_trace] codegen source initialized at: {codegen_out_path}{_ANSI_RESET}")
                 else:
@@ -763,8 +768,8 @@ def _wrap_codegen_ffi(original_build):
                             with open(original_path, "w") as _f:
                                 _f.write(codegen_text)
                             patched_text = working_text
+                            print(f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_codegen: SYNCED (user edits match codegen, baseline advanced){_ANSI_RESET}")
                         else:
-                            import shutil
                             shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
                             shutil.copyfile(original_path, original_path + ".bak")
                             with open(original_path, "w") as _f:
@@ -874,7 +879,7 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
 
     from tvm.ir.transform import Pass
 
-    global _original_pass_call, _original_pipeline_lower, _atexit_registered
+    global _original_pass_call, _original_pipeline_lower, _atexit_registered, _legacy_patched
     if _original_pass_call is None:
         _original_pass_call = Pass.__call__
         Pass.__call__ = _traced_pass_call
@@ -895,7 +900,7 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
 
     _register_atexit()
 
-    if _original_pipeline_lower is not None:
+    if _original_pipeline_lower is not None or _legacy_patched:
         return
 
     try:
@@ -936,7 +941,7 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
         if phase_func.__name__ in getattr(lower_func, "__globals__", {}):
             lower_func.__globals__[phase_func.__name__] = wrapped
 
-    _original_pipeline_lower = True
+    _legacy_patched = True
     print(
         f"[lower_trace] IR pass tracing patched (phase-based architecture, "
         f"{len(phase_funcs)} phases). Set TILELANG_LOWER_TRACE=1 to enable."
@@ -955,12 +960,12 @@ def _final_report():
         _update_html_symlink(html_path)
         print(f"  [lower_trace] Final HTML report: {_ANSI_BLUE}{os.path.join(_script_dir, 'lower_trace.html')}{_ANSI_RESET}")
     except Exception as exc:
-        print(f"  [lower_trace] WARNING: failed to generate final HTML report: {exc}")
+        print(f"  {_ANSI_RED}[lower_trace] WARNING: failed to generate final HTML report: {exc}{_ANSI_RESET}")
 
 
 def uninstall():
     """Remove the pass tracing hook and restore original behavior."""
-    global _original_pass_call, _original_pipeline_lower, _atexit_registered, _run_counter
+    global _original_pass_call, _original_pipeline_lower, _atexit_registered, _run_counter, _legacy_patched
     global _mode_override, _trace_dir_override, _codegen_output_path_override, _script_dir, _run_dir
 
     if _original_pass_call is not None:
@@ -969,12 +974,13 @@ def uninstall():
         Pass.__call__ = _original_pass_call
         _original_pass_call = None
 
-    if _original_pipeline_lower is not None and _original_pipeline_lower is not True:
+    if _original_pipeline_lower is not None:
         from tilelang.backend.pass_pipeline import PassPipeline
 
         PassPipeline.lower = _original_pipeline_lower
 
     _original_pipeline_lower = None
+    _legacy_patched = False
 
     import tvm.ffi
 
