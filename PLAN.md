@@ -121,7 +121,7 @@ _lock = threading.RLock()
 ```python
 # tilelang/tools/lower_trace/core.py — 直接读取 os.environ，不依赖 tilelang.env
 TL_LOWER_TRACE       # 模式: 1/html/terminal/both, 0/off 关闭
-TL_LOWER_TRACE_DIR   # 输出根目录, 默认 ./tmp/lower_trace_output
+TL_LOWER_TRACE_DIR   # 输出根目录, 默认 ./tmp/lower_trace_dir
 ```
 
 ---

@@ -228,11 +228,11 @@ TL_LOWER_TRACE=both python3 my_script.py
 python3 my_script.py
 ```
 
-When HTML output is enabled, a stable symlink `<script_dir>/lower_trace.html` is maintained and points to the latest run's report. Open it directly in a browser:
+When HTML output is enabled, a stable symlink `<script_dir>/report.html` is maintained and points to the latest run's report. Open it directly in a browser:
 
 ```bash
 # typical location
-open tmp/lower_trace_output/my_script/lower_trace.html
+open tmp/lower_trace_dir/my_script/report.html
 ```
 
 ### Environment Variables
@@ -240,7 +240,7 @@ open tmp/lower_trace_output/my_script/lower_trace.html
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `TL_LOWER_TRACE` | Enable tracing. Values: `0`/`off`/`false`/`no` (off), `1`/`on`/`true`/`yes` (→ html), `terminal`, `html`, `both` | off |
-| `TL_LOWER_TRACE_DIR` | Base output directory for all trace artifacts | `./tmp/lower_trace_output` |
+| `TL_LOWER_TRACE_DIR` | Base output directory for all trace artifacts | `./tmp/lower_trace_dir` |
 
 ### Output Directory Structure
 
@@ -249,13 +249,13 @@ A single run produces the following layout under `TL_LOWER_TRACE_DIR`:
 ```
 <TL_LOWER_TRACE_DIR>/
 └── <script_name>/                      # derived from sys.argv[0], e.g. "my_script"
-    ├── lower_trace.html                # symlink → latest run's report
+    ├── report.html                # symlink → latest run's report
     ├── codegen.cpp                     # generated codegen source (editable, see below)
     ├── codegen.cpp.original            # baseline snapshot for edit/recompile workflow
     ├── codegen.cpp.latest              # actual codegen output of the most recent run
     └── run_records/
         └── run_<YYYYMMDD_HHMMSS_ffffff>_<pid>/
-            ├── lower_trace.html        # this run's full report
+            ├── report.html        # this run's full report
             ├── pipeline_c/             # one subdir per phase
             │   ├── 00_BindTarget_before.tir
             │   ├── 00_BindTarget_after.tir
@@ -314,27 +314,55 @@ Returns a `list[dict]` with one entry per pass step, each containing `name`, `be
 To trace the *entire* compilation pipeline of a real kernel (what the environment variable does, but programmatically):
 
 ```python
-from tilelang.tools.lower_trace import patch, uninstall, reset
+from tilelang.tools.lower_trace import patch
 
 # Activate tracing for the rest of the process.
 patch(mode="both", trace_dir="./my_trace", codegen_output="./my_trace/codegen.cpp")
 
 # ... run tilelang.compile() / kernel compilation ...
-
-# Clear records between runs (keeps the hook installed).
-reset()
-
-# Restore original behaviour.
-uninstall()
 ```
+
+That's all — when the process exits, an `atexit` handler automatically flushes the final HTML report. Neither `reset()` nor `uninstall()` is required for the common one-shot workflow.
 
 | Parameter | Description |
 |-----------|-------------|
 | `mode` | Force a trace mode: `"terminal"`, `"html"`, `"both"`, or `None` to disable. When omitted, falls back to the `TL_LOWER_TRACE` env var. |
-| `trace_dir` | Base output directory. When omitted, falls back to `TL_LOWER_TRACE_DIR`, then `./tmp/lower_trace_output`. |
+| `trace_dir` | Base output directory. When omitted, falls back to `TL_LOWER_TRACE_DIR`, then `./tmp/lower_trace_dir`. |
 | `codegen_output` | Path to save the generated codegen source (enables the edit-recompile workflow). When omitted, defaults to `<script_dir>/codegen.cpp`. Pass `None` explicitly to suppress. |
 
-`patch()` is idempotent — calling it multiple times is safe. `uninstall()` removes all hooks and clears state. `reset()` clears collected records while keeping the hook active.
+`patch()` is idempotent — calling it multiple times is safe.
+
+##### When to use `reset()` and `uninstall()`
+
+Both are **optional** and only needed in specific scenarios:
+
+| Function | When to call | What it does |
+|----------|--------------|--------------|
+| `reset()` | Compiling **multiple kernels in the same process** and you want each kernel's report to start fresh (instead of accumulating into one combined report) | Clears collected records while keeping the hook active. Without it, records accumulate across compilations, tagged with `run2_`, `run3_`, … prefixes — which is desirable if you *want* to compare runs side by side. |
+| `uninstall()` | You want to **disable tracing for subsequent compilations** within the same process (e.g. a long-running service that only traces the first kernel) | Restores the original `Pass.__call__`, `PassPipeline.lower`, and codegen FFIs, and clears all state. |
+
+```python
+from tilelang.tools.lower_trace import patch, reset, uninstall
+
+patch(mode="both")
+
+# First kernel — traced.
+kernel1 = tilelang.compile(func_a)
+
+# Optional: clear records so kernel2 gets its own clean report.
+# Omit this line if you prefer a combined multi-run report.
+reset()
+
+# Second kernel — traced (into a fresh report if reset() was called).
+kernel2 = tilelang.compile(func_b)
+
+# Optional: disable tracing for any further compilations.
+uninstall()
+```
+
+:::{note}
+If neither `reset()` nor `uninstall()` is called, tracing stays active for the lifetime of the process and the final HTML report is generated automatically at exit. This is the simplest workflow and is sufficient for most one-off scripts.
+:::
 
 ### HTML Report Features
 

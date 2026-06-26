@@ -151,7 +151,7 @@ def _get_base_trace_dir() -> str:
         return _trace_dir_override  # type: ignore[return-value]
     return (
         os.environ.get("TL_LOWER_TRACE_DIR")
-        or os.path.join(".", "tmp", "lower_trace_output")
+        or os.path.join(".", "tmp", "lower_trace_dir")
     )
 
 
@@ -188,13 +188,13 @@ def _ensure_run_dir() -> str:
 
 
 def _update_html_symlink(run_html_path: str):
-    """Create/refresh ``<script_dir>/lower_trace.html`` → ``run_html_path``.
+    """Create/refresh ``<script_dir>/report.html`` → ``run_html_path``.
 
     On platforms where ``os.symlink`` fails (e.g. Windows without privileges),
     falls back to copying the file and prints a one-time warning.
     """
     script_dir = _ensure_script_dir()
-    link_path = os.path.join(script_dir, "lower_trace.html")
+    link_path = os.path.join(script_dir, "report.html")
     try:
         if os.path.islink(link_path) or os.path.exists(link_path):
             os.remove(link_path)
@@ -253,7 +253,7 @@ def _incremental_flush_html():
 
     from .html import generate_html
 
-    html_path = os.path.join(_run_dir, "lower_trace.html")
+    html_path = os.path.join(_run_dir, "report.html")
     generate_html(_records, html_path)
     _update_html_symlink(html_path)
 
@@ -855,7 +855,7 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
     trace_dir : str | None, optional
         Force the trace output base directory.  When omitted, falls back to
         the ``TL_LOWER_TRACE_DIR`` env var, then
-        ``./tmp/lower_trace_output``.
+        ``./tmp/lower_trace_dir``.
     codegen_output : str | None, optional
         Path to save the codegen-generated C++/CUDA/etc. source code.  When
         omitted, defaults to ``<script_dir>/codegen.cpp`` (inside the
@@ -951,10 +951,10 @@ def _final_report():
     try:
         from .html import generate_html
 
-        html_path = os.path.join(_run_dir, "lower_trace.html")
+        html_path = os.path.join(_run_dir, "report.html")
         generate_html(_records, html_path)
         _update_html_symlink(html_path)
-        print(f"  [lower_trace] Final HTML report: {_ANSI_BLUE}{os.path.join(_script_dir, 'lower_trace.html')}{_ANSI_RESET}")
+        print(f"  [lower_trace] Final HTML report: {_ANSI_BLUE}{os.path.join(_script_dir, 'report.html')}{_ANSI_RESET}")
     except Exception as exc:
         print(f"  {_ANSI_RED}[lower_trace] WARNING: failed to generate final HTML report: {exc}{_ANSI_RESET}")
 
