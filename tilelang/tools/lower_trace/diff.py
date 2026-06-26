@@ -8,6 +8,8 @@ import difflib
 _ANSI_RESET = "\033[0m"
 _ANSI_RED = "\033[31m"
 _ANSI_GREEN = "\033[32m"
+_ANSI_YELLOW = "\033[33m"
+_ANSI_BLUE = "\033[34m"
 _ANSI_CYAN = "\033[36m"
 _ANSI_BOLD = "\033[1m"
 _ANSI_DIM = "\033[2m"

@@ -31,6 +31,17 @@ import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .diff import (
+    _ANSI_BOLD,
+    _ANSI_BLUE,
+    _ANSI_CYAN,
+    _ANSI_DIM,
+    _ANSI_GREEN,
+    _ANSI_RED,
+    _ANSI_RESET,
+    _ANSI_YELLOW,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -89,6 +100,7 @@ _atexit_registered: bool = False
 _UNSET: object = object()
 _mode_override: str | None | object = _UNSET
 _trace_dir_override: str | None | object = _UNSET
+_codegen_output_path_override: str | None | object = _UNSET
 
 # Phase label used for passes that run outside any PassPipeline.lower window
 # (e.g. pre-pipeline module passes and tvm.build postproc), so they are still
@@ -130,6 +142,16 @@ def _should_gen_html() -> bool:
     return mode in ("html", "both")
 
 
+def _get_base_trace_dir() -> str:
+    """Return the configured base trace directory (first level)."""
+    if _trace_dir_override is not _UNSET and _trace_dir_override:
+        return _trace_dir_override  # type: ignore[return-value]
+    return (
+        os.environ.get("TILELANG_LOWER_TRACE_DIR")
+        or os.path.join(".", "tmp", "lower_trace_output")
+    )
+
+
 def _ensure_trace_dir() -> str:
     """Initialize and return the trace directory path (created on first call)."""
     global _trace_dir
@@ -139,18 +161,26 @@ def _ensure_trace_dir() -> str:
 
     from datetime import datetime
 
-    base_dir = (
-        _trace_dir_override
-        if _trace_dir_override is not _UNSET and _trace_dir_override
-        else os.environ.get("TILELANG_LOWER_TRACE_DIR")
-        or os.path.join(".", "tmp", "lower_trace_output")
-    )
+    base_dir = _get_base_trace_dir()
     script_name = os.path.splitext(os.path.basename(sys.argv[0]))[0] or "kernel"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     _trace_dir = os.path.join(base_dir, f"{script_name}_{timestamp}_{os.getpid()}")
 
     os.makedirs(_trace_dir, exist_ok=True)
     return _trace_dir
+
+
+def _get_codegen_output_path() -> str | None:
+    if _codegen_output_path_override is not _UNSET:
+        return _codegen_output_path_override
+    env_val = os.environ.get("TILELANG_LOWER_TRACE_CODEGEN_OUTPUT")
+    if env_val is not None:
+        return env_val
+    if _is_trace_enabled():
+        base_dir = _get_base_trace_dir()
+        script_name = os.path.splitext(os.path.basename(sys.argv[0]))[0] or "kernel"
+        return os.path.join(base_dir, f"{script_name}.cpp")
+    return None
 
 
 def _save_raw_files(record: LowerRecord):
@@ -564,6 +594,19 @@ def _traced_pipeline_lower(self, mod, target):
     return result
 
 
+class _CodegenSourceProxy:
+    """Proxy returned when codegen is skipped (source loaded from file)."""
+
+    def __init__(self, source: str):
+        self._source = source
+
+    def inspect_source(self) -> str:
+        return self._source
+
+    def get_source(self) -> str:
+        return self._source
+
+
 def _wrap_codegen_ffi(original_build):
     """Return a wrapper around a codegen FFI build function (``target.build.*``).
 
@@ -573,7 +616,34 @@ def _wrap_codegen_ffi(original_build):
        ``tir.transform.Simplify()`` call in ``device_codegen`` is automatically
        attributed to the ``codegen`` phase.
     3. After codegen finishes, captures the generated source via
-       ``result.get_source()`` and appends a ``STATUS_CODEGEN`` record.
+       ``result.inspect_source()`` and appends a ``STATUS_CODEGEN`` record.
+
+    Codegen output handling (when ``codegen_output`` path is configured):
+
+    Three files collaborate to disambiguate whether a content difference is
+    caused by user edits, by a codegen change, or by both:
+    - ``<path>``           — user-editable working copy.
+    - ``<path>.original``  — baseline: the codegen snapshot the working copy
+                             was last synced from (written only on init or
+                             re-sync, never blindly overwritten).
+    - ``<path>.latest``    — the actual codegen output of *this* run
+                             (overwritten every run, for diff reference).
+
+    On each run a three-way comparison (baseline / working / current codegen)
+    decides:
+    - neither changed            → use codegen as-is.
+    - only codegen changed       → regenerate ``<path>`` and ``.original``
+                                   from the new codegen.
+    - only user edited           → inject the working copy (PATCHED).
+    - both changed, working==    → user already synced manually; advance
+      current                     baseline and use the working copy.
+    - both changed, working!=    → CONFLICT: back up the user's working copy
+      current                     to ``<path>.bak`` and the old baseline to
+                                   ``<path>.original.bak``, then regenerate
+                                   ``<path>`` and ``.original`` from the new
+                                   codegen and compile with it.  The user can
+                                   recover their edits via
+                                   ``diff(<path>.original.bak, <path>.bak)``.
     """
 
     @functools.wraps(original_build)
@@ -589,6 +659,7 @@ def _wrap_codegen_ffi(original_build):
             _ensure_trace_dir()
 
         before_text = str(mod)
+        codegen_out_path = _get_codegen_output_path()
 
         with _lock:
             idx = _pass_index
@@ -615,7 +686,66 @@ def _wrap_codegen_ffi(original_build):
                 print(f"  [lower_trace] codegen/{idx:02d}_codegen: FAILED ({e})")
             raise
 
-        after_text = result.inspect_source()
+        codegen_text = result.inspect_source()
+
+        patched_text = None
+        if codegen_out_path:
+            original_path = codegen_out_path + ".original"
+            latest_path = codegen_out_path + ".latest"
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(codegen_out_path)), exist_ok=True)
+                with open(latest_path, "w") as _f:
+                    _f.write(codegen_text)
+                if not os.path.isfile(codegen_out_path) or not os.path.isfile(original_path):
+                    with open(original_path, "w") as _f:
+                        _f.write(codegen_text)
+                    import shutil
+                    shutil.copyfile(original_path, codegen_out_path)
+                    print(f"  {_ANSI_GREEN}[lower_trace] codegen source initialized at: {codegen_out_path}{_ANSI_RESET}")
+                else:
+                    with open(original_path, "r") as _f:
+                        baseline_text = _f.read()
+                    with open(codegen_out_path, "r") as _f:
+                        working_text = _f.read()
+                    user_edited = working_text.rstrip() != baseline_text.rstrip()
+                    codegen_changed = codegen_text.rstrip() != baseline_text.rstrip()
+                    if not user_edited and not codegen_changed:
+                        patched_text = None
+                    elif not user_edited and codegen_changed:
+                        with open(original_path, "w") as _f:
+                            _f.write(codegen_text)
+                        with open(codegen_out_path, "w") as _f:
+                            _f.write(codegen_text)
+                        print(f"  {_ANSI_CYAN}[lower_trace] codegen/{idx:02d}_codegen: REGENERATED (codegen changed, no user edits){_ANSI_RESET}")
+                        patched_text = None
+                    elif user_edited and not codegen_changed:
+                        patched_text = working_text
+                        print(f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_codegen: PATCHED from {codegen_out_path}{_ANSI_RESET}")
+                    else:
+                        if working_text.rstrip() == codegen_text.rstrip():
+                            with open(original_path, "w") as _f:
+                                _f.write(codegen_text)
+                            patched_text = working_text
+                        else:
+                            import shutil
+                            shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
+                            shutil.copyfile(original_path, original_path + ".bak")
+                            with open(original_path, "w") as _f:
+                                _f.write(codegen_text)
+                            with open(codegen_out_path, "w") as _f:
+                                _f.write(codegen_text)
+                            print(
+                                f"  {_ANSI_BOLD}{_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_codegen: CONFLICT "
+                                f"— {codegen_out_path} had user edits AND codegen changed; "
+                                f"backed up to {codegen_out_path}.bak / {original_path}.bak, "
+                                f"regenerated from new codegen.{_ANSI_RESET}"
+                            )
+                            patched_text = None
+            except Exception as _exc:
+                print(f"  {_ANSI_RED}[lower_trace] WARNING: codegen file I/O failed: {_exc}{_ANSI_RESET}")
+                patched_text = None
+
+        after_text = patched_text if patched_text is not None else codegen_text
 
         sm = difflib.SequenceMatcher(None, before_text.splitlines(), after_text.splitlines())
         add_count = del_count = 0
@@ -643,7 +773,8 @@ def _wrap_codegen_ffi(original_build):
             _records.append(record)
             _save_raw_files(record)
             tag = "CODEGEN"
-            print(f"  [lower_trace] codegen/{idx:02d}_codegen: {tag} (+{add_count}/−{del_count})")
+            path_suffix = f"  →  {codegen_out_path}" if codegen_out_path else ""
+            print(f"  {_ANSI_BLUE}[lower_trace] codegen/{idx:02d}_codegen: {tag} (+{add_count}/−{del_count}){path_suffix}{_ANSI_RESET}")
             _current_phase = None
 
             if gen_html:
@@ -654,6 +785,8 @@ def _wrap_codegen_ffi(original_build):
             from .diff import print_diff
             print_diff(before_text, after_text, "codegen (TIR before)", "codegen (C++ after)")
 
+        if patched_text is not None:
+            return _CodegenSourceProxy(patched_text)
         return result
 
     return wrapper
@@ -670,7 +803,7 @@ def _register_atexit():
     _atexit_registered = True
 
 
-def patch(*, mode=_UNSET, trace_dir=_UNSET):
+def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
     """Activate IR pass tracing via monkey-patching.
 
     Parameters
@@ -684,13 +817,23 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET):
         Force the trace output base directory.  When omitted, falls back to
         the ``TILELANG_LOWER_TRACE_DIR`` env var, then
         ``./tmp/lower_trace_output``.
+    codegen_output : str | None, optional
+        Path to save the codegen-generated C++/CUDA/etc. source code.  When
+        omitted, falls back to the ``TILELANG_LOWER_TRACE_CODEGEN_OUTPUT`` env
+        var, then ``<base_trace_dir>/<script_name>.cpp`` (the first-level trace
+        directory, beside the per-run timestamped subdirectory).  Pass ``None``
+        explicitly to suppress all extra saves.  See ``_wrap_codegen_ffi`` for
+        the three-file (``<path>`` / ``<path>.original`` / ``<path>.latest``)
+        patch-and-recompile workflow.
     """
-    global _mode_override, _trace_dir_override
+    global _mode_override, _trace_dir_override, _codegen_output_path_override
 
     if mode is not _UNSET:
         _mode_override = _parse_lower_trace_mode(mode if mode is None else str(mode))
     if trace_dir is not _UNSET:
         _trace_dir_override = trace_dir if trace_dir is None else str(trace_dir)
+    if codegen_output is not _UNSET:
+        _codegen_output_path_override = codegen_output if codegen_output is None else str(codegen_output)
 
     from tvm.ir.transform import Pass
 
@@ -780,7 +923,7 @@ def _final_report():
 def uninstall():
     """Remove the pass tracing hook and restore original behavior."""
     global _original_pass_call, _original_pipeline_lower, _atexit_registered, _run_counter
-    global _mode_override, _trace_dir_override
+    global _mode_override, _trace_dir_override, _codegen_output_path_override, _trace_dir
 
     if _original_pass_call is not None:
         from tvm.ir.transform import Pass
@@ -806,6 +949,7 @@ def uninstall():
 
     _mode_override = _UNSET
     _trace_dir_override = _UNSET
+    _codegen_output_path_override = _UNSET
 
     if _atexit_registered:
         import atexit
@@ -814,15 +958,23 @@ def uninstall():
         _atexit_registered = False
 
     _run_counter = 0
+    _trace_dir = None
     reset()
 
 
 def reset():
-    """Clear collected records, section cache, and trace directory."""
-    global _records, _section_cache, _trace_dir, _current_phase, _pass_index, _auto_flush
+    """Clear collected records and section cache.
+
+    The trace directory (``_trace_dir``) is intentionally preserved so that a
+    single output folder is reused for the lifetime of the process.  Resetting
+    it here would cause pre-pipeline passes (which lazily create the dir via
+    ``_ensure_trace_dir``) and the subsequent ``PassPipeline.lower`` call (which
+    invokes ``reset`` on its first run) to produce two separate timestamped
+    directories.
+    """
+    global _records, _section_cache, _current_phase, _pass_index, _auto_flush
     _records = []
     _section_cache = []
-    _trace_dir = None
     _current_phase = None
     _pass_index = 0
     _auto_flush = False
