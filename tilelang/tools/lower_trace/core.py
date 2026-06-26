@@ -92,7 +92,8 @@ _CODEGEN_FFI_NAMES: list[str] = [
 _current_phase: str | None = None
 _pass_index: int = 0
 _auto_flush: bool = False
-_trace_dir: str | None = None
+_script_dir: str | None = None
+_run_dir: str | None = None
 _lock = threading.RLock()
 _run_counter: int = 0
 _atexit_registered: bool = False
@@ -152,22 +153,54 @@ def _get_base_trace_dir() -> str:
     )
 
 
-def _ensure_trace_dir() -> str:
-    """Initialize and return the trace directory path (created on first call)."""
-    global _trace_dir
+def _ensure_script_dir() -> str:
+    """Return ``<base_dir>/<script_name>/`` (created on first call, stable across runs)."""
+    global _script_dir
 
-    if _trace_dir is not None:
-        return _trace_dir
-
-    from datetime import datetime
+    if _script_dir is not None:
+        return _script_dir
 
     base_dir = _get_base_trace_dir()
     script_name = os.path.splitext(os.path.basename(sys.argv[0]))[0] or "kernel"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    _trace_dir = os.path.join(base_dir, f"{script_name}_{timestamp}_{os.getpid()}")
+    _script_dir = os.path.join(base_dir, script_name)
 
-    os.makedirs(_trace_dir, exist_ok=True)
-    return _trace_dir
+    os.makedirs(_script_dir, exist_ok=True)
+    return _script_dir
+
+
+def _ensure_run_dir() -> str:
+    """Return ``<script_dir>/run_records/run_<timestamp>_<pid>/`` (new per run)."""
+    global _run_dir
+
+    if _run_dir is not None:
+        return _run_dir
+
+    from datetime import datetime
+
+    script_dir = _ensure_script_dir()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    _run_dir = os.path.join(script_dir, "run_records", f"run_{timestamp}_{os.getpid()}")
+
+    os.makedirs(_run_dir, exist_ok=True)
+    return _run_dir
+
+
+def _update_html_symlink(run_html_path: str):
+    """Create/refresh ``<script_dir>/lower_trace.html`` → ``run_html_path``.
+
+    On platforms where ``os.symlink`` fails (e.g. Windows without privileges),
+    falls back to copying the file and prints a one-time warning.
+    """
+    script_dir = _ensure_script_dir()
+    link_path = os.path.join(script_dir, "lower_trace.html")
+    try:
+        if os.path.islink(link_path) or os.path.exists(link_path):
+            os.remove(link_path)
+        os.symlink(os.path.relpath(run_html_path, script_dir), link_path)
+    except OSError:
+        import shutil
+
+        shutil.copyfile(run_html_path, link_path)
 
 
 def _get_codegen_output_path() -> str | None:
@@ -177,9 +210,8 @@ def _get_codegen_output_path() -> str | None:
     if env_val is not None:
         return env_val
     if _is_trace_enabled():
-        base_dir = _get_base_trace_dir()
-        script_name = os.path.splitext(os.path.basename(sys.argv[0]))[0] or "kernel"
-        return os.path.join(base_dir, f"{script_name}.cpp")
+        script_dir = _ensure_script_dir()
+        return os.path.join(script_dir, "codegen.cpp")
     return None
 
 
@@ -189,7 +221,7 @@ def _save_raw_files(record: LowerRecord):
     For codegen records the *after* text is C++ source, so we write ``*.cpp``
     instead of ``*.tir``.
     """
-    trace_dir = _ensure_trace_dir()
+    trace_dir = _ensure_run_dir()
     phase_dir = os.path.join(trace_dir, record.phase)
     os.makedirs(phase_dir, exist_ok=True)
 
@@ -217,13 +249,14 @@ def _incremental_flush_html():
     Uses _section_cache to avoid re-rendering previously completed sections.
     Total cost is O(n) instead of O(n^2) for full rewrites.
     """
-    if not _records or not _trace_dir:
+    if not _records or not _run_dir:
         return
 
     from .html import generate_html
 
-    html_path = os.path.join(_trace_dir, "lower_trace.html")
+    html_path = os.path.join(_run_dir, "lower_trace.html")
     generate_html(_records, html_path)
+    _update_html_symlink(html_path)
 
 
 def _traced_pass_call(self, mod):
@@ -243,7 +276,7 @@ def _traced_pass_call(self, mod):
     phase = _current_phase or _UNSCOPED_PHASE
     gen_html = _should_gen_html()
     if gen_html:
-        _ensure_trace_dir()
+        _ensure_run_dir()
     before_text = str(mod)
 
     with _lock:
@@ -506,13 +539,15 @@ def _wrap_phase(original_func, phase_index, total_phases):
 
     @functools.wraps(original_func)
     def wrapper(*args, **kwargs):
-        global _run_counter, _current_phase, _auto_flush
+        global _run_counter, _current_phase, _auto_flush, _run_dir
 
         with _lock:
             if phase_index == 1:
                 _run_counter += 1
                 if _run_counter == 1:
                     reset()
+                else:
+                    _run_dir = None
 
             run_prefix = f"run{_run_counter}_" if _run_counter > 1 else ""
             phase_name = f"{run_prefix}{base_phase_name}"
@@ -557,12 +592,14 @@ def _traced_pipeline_lower(self, mod, target):
     passes (e.g. LetInline) that are skipped at runtime simply do not appear,
     matching the behaviour of ``pass_diff``.
     """
-    global _run_counter, _current_phase, _auto_flush
+    global _run_counter, _current_phase, _auto_flush, _run_dir
 
     with _lock:
         _run_counter += 1
         if _run_counter == 1:
             reset()
+        else:
+            _run_dir = None
 
         run_prefix = f"run{_run_counter}_" if _run_counter > 1 else ""
         phase_name = f"{run_prefix}pipeline_{self.name}"
@@ -656,7 +693,7 @@ def _wrap_codegen_ffi(original_build):
         mod = args[0] if args else kwargs.get("mod")
         gen_html = _should_gen_html()
         if gen_html:
-            _ensure_trace_dir()
+            _ensure_run_dir()
 
         before_text = str(mod)
         codegen_out_path = _get_codegen_output_path()
@@ -773,8 +810,8 @@ def _wrap_codegen_ffi(original_build):
             _records.append(record)
             _save_raw_files(record)
             tag = "CODEGEN"
-            path_suffix = f"  →  {codegen_out_path}" if codegen_out_path else ""
-            print(f"  {_ANSI_BLUE}[lower_trace] codegen/{idx:02d}_codegen: {tag} (+{add_count}/−{del_count}){path_suffix}{_ANSI_RESET}")
+            path_suffix = f"  →  {_ANSI_BLUE}{codegen_out_path}{_ANSI_RESET}" if codegen_out_path else ""
+            print(f"  [lower_trace] codegen/{idx:02d}_codegen: {tag} (+{add_count}/−{del_count}){path_suffix}")
             _current_phase = None
 
             if gen_html:
@@ -820,11 +857,11 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
     codegen_output : str | None, optional
         Path to save the codegen-generated C++/CUDA/etc. source code.  When
         omitted, falls back to the ``TILELANG_LOWER_TRACE_CODEGEN_OUTPUT`` env
-        var, then ``<base_trace_dir>/<script_name>.cpp`` (the first-level trace
-        directory, beside the per-run timestamped subdirectory).  Pass ``None``
-        explicitly to suppress all extra saves.  See ``_wrap_codegen_ffi`` for
-        the three-file (``<path>`` / ``<path>.original`` / ``<path>.latest``)
-        patch-and-recompile workflow.
+        var, then ``<script_dir>/codegen.cpp`` (inside the per-script output
+        directory, beside ``run_records/``).  Pass ``None`` explicitly to
+        suppress all extra saves.  See ``_wrap_codegen_ffi`` for the three-file
+        (``<path>`` / ``<path>.original`` / ``<path>.latest``) patch-and-recompile
+        workflow.
     """
     global _mode_override, _trace_dir_override, _codegen_output_path_override
 
@@ -908,14 +945,15 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
 
 def _final_report():
     """Generate final HTML report at process exit, covering all accumulated runs."""
-    if not _records or not _trace_dir:
+    if not _records or not _run_dir:
         return
     try:
         from .html import generate_html
 
-        html_path = os.path.join(_trace_dir, "lower_trace.html")
+        html_path = os.path.join(_run_dir, "lower_trace.html")
         generate_html(_records, html_path)
-        print(f"  [lower_trace] Final HTML report: {html_path}")
+        _update_html_symlink(html_path)
+        print(f"  [lower_trace] Final HTML report: {_ANSI_BLUE}{os.path.join(_script_dir, 'lower_trace.html')}{_ANSI_RESET}")
     except Exception as exc:
         print(f"  [lower_trace] WARNING: failed to generate final HTML report: {exc}")
 
@@ -923,7 +961,7 @@ def _final_report():
 def uninstall():
     """Remove the pass tracing hook and restore original behavior."""
     global _original_pass_call, _original_pipeline_lower, _atexit_registered, _run_counter
-    global _mode_override, _trace_dir_override, _codegen_output_path_override, _trace_dir
+    global _mode_override, _trace_dir_override, _codegen_output_path_override, _script_dir, _run_dir
 
     if _original_pass_call is not None:
         from tvm.ir.transform import Pass
@@ -958,19 +996,23 @@ def uninstall():
         _atexit_registered = False
 
     _run_counter = 0
-    _trace_dir = None
+    _script_dir = None
+    _run_dir = None
     reset()
 
 
 def reset():
     """Clear collected records and section cache.
 
-    The trace directory (``_trace_dir``) is intentionally preserved so that a
-    single output folder is reused for the lifetime of the process.  Resetting
-    it here would cause pre-pipeline passes (which lazily create the dir via
-    ``_ensure_trace_dir``) and the subsequent ``PassPipeline.lower`` call (which
-    invokes ``reset`` on its first run) to produce two separate timestamped
-    directories.
+    ``_script_dir`` is preserved (stable across runs, holds codegen files +
+    html symlink).  ``_run_dir`` is also preserved: clearing it here would
+    split a single run into two directories, because pre-pipeline passes
+    (which lazily create it via ``_ensure_run_dir``) run before
+    ``PassPipeline.lower``/``_wrap_phase`` invokes ``reset`` on its first run.
+    A fresh ``_run_dir`` for each subsequent run is instead established
+    directly in ``_traced_pipeline_lower`` / ``_wrap_phase`` (when
+    ``_run_counter > 1``), without calling ``reset`` so that records keep
+    accumulating across runs.
     """
     global _records, _section_cache, _current_phase, _pass_index, _auto_flush
     _records = []
