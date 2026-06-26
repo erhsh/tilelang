@@ -11,7 +11,7 @@
 
 | 项目 | 值 |
 |------|-----|
-| 环境变量 | `TILELANG_LOWER_TRACE` / `TILELANG_LOWER_TRACE_DIR` |
+| 环境变量 | `TL_LOWER_TRACE` / `TL_LOWER_TRACE_DIR` |
 | 模块路径 | `tilelang/tools/lower_trace/` |
 | 工作分支 | `main_lower-trace`（不创建新分支） |
 | 旧代码 | **完全删除** |
@@ -121,11 +121,11 @@ _lock = threading.RLock()
 
 ```python
 # tilelang/env.py
-TILELANG_LOWER_TRACE = EnvVar("TILELANG_LOWER_TRACE", "0")
-TILELANG_LOWER_TRACE_DIR = EnvVar("TILELANG_LOWER_TRACE_DIR", "tmp/lower_trace_output")
+TL_LOWER_TRACE = EnvVar("TL_LOWER_TRACE", "0")
+TL_LOWER_TRACE_DIR = EnvVar("TL_LOWER_TRACE_DIR", "tmp/lower_trace_output")
 
 def get_lower_trace_mode(self) -> str | None:
-    value = str(self.TILELANG_LOWER_TRACE).lower().strip()
+    value = str(self.TL_LOWER_TRACE).lower().strip()
     if value in ("0", "false", "no", "off", ""):
         return None
     if value in ("1", "true", "yes", "on", "html"):

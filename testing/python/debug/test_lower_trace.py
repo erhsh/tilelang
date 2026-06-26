@@ -14,11 +14,11 @@ from tilelang.env import env
 
 @pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch):
-    monkeypatch.delenv("TILELANG_LOWER_TRACE", raising=False)
-    monkeypatch.delenv("TILELANG_LOWER_TRACE_DIR", raising=False)
+    monkeypatch.delenv("TL_LOWER_TRACE", raising=False)
+    monkeypatch.delenv("TL_LOWER_TRACE_DIR", raising=False)
     yield
-    monkeypatch.delenv("TILELANG_LOWER_TRACE", raising=False)
-    monkeypatch.delenv("TILELANG_LOWER_TRACE_DIR", raising=False)
+    monkeypatch.delenv("TL_LOWER_TRACE", raising=False)
+    monkeypatch.delenv("TL_LOWER_TRACE_DIR", raising=False)
 
 
 def _simple_program():
@@ -41,24 +41,24 @@ def test_env_default_off():
 
 def test_env_off_values(monkeypatch):
     for v in ("0", "off", "false", "no", ""):
-        monkeypatch.setenv("TILELANG_LOWER_TRACE", v)
+        monkeypatch.setenv("TL_LOWER_TRACE", v)
         assert env.get_lower_trace_mode() is None, f"Expected None for {v!r}"
 
 
 def test_env_truthy_maps_to_html(monkeypatch):
     for v in ("1", "on", "true", "yes"):
-        monkeypatch.setenv("TILELANG_LOWER_TRACE", v)
+        monkeypatch.setenv("TL_LOWER_TRACE", v)
         assert env.get_lower_trace_mode() == "html", f"Expected 'html' for {v!r}"
 
 
 def test_env_explicit_modes(monkeypatch):
-    monkeypatch.setenv("TILELANG_LOWER_TRACE", "terminal")
+    monkeypatch.setenv("TL_LOWER_TRACE", "terminal")
     assert env.get_lower_trace_mode() == "terminal"
 
-    monkeypatch.setenv("TILELANG_LOWER_TRACE", "html")
+    monkeypatch.setenv("TL_LOWER_TRACE", "html")
     assert env.get_lower_trace_mode() == "html"
 
-    monkeypatch.setenv("TILELANG_LOWER_TRACE", "both")
+    monkeypatch.setenv("TL_LOWER_TRACE", "both")
     assert env.get_lower_trace_mode() == "both"
 
 
@@ -152,8 +152,8 @@ def test_multi_run_accumulation(monkeypatch):
     from tilelang.backend.pass_pipeline import resolve_pipeline
     import tilelang.language as T
 
-    monkeypatch.setenv("TILELANG_LOWER_TRACE", "both")
-    monkeypatch.setenv("TILELANG_LOWER_TRACE_DIR", tempfile.mkdtemp(prefix="lt_test_"))
+    monkeypatch.setenv("TL_LOWER_TRACE", "both")
+    monkeypatch.setenv("TL_LOWER_TRACE_DIR", tempfile.mkdtemp(prefix="lt_test_"))
 
     uninstall()
     patch()
@@ -185,8 +185,8 @@ def test_multi_run_accumulation(monkeypatch):
     assert "run2_pipeline_c" in phases, "Second run should have phase 'run2_pipeline_c'"
 
     uninstall()
-    monkeypatch.delenv("TILELANG_LOWER_TRACE", raising=False)
-    monkeypatch.delenv("TILELANG_LOWER_TRACE_DIR", raising=False)
+    monkeypatch.delenv("TL_LOWER_TRACE", raising=False)
+    monkeypatch.delenv("TL_LOWER_TRACE_DIR", raising=False)
 
 
 def test_diff_html_line_numbers_monotone():
@@ -220,8 +220,8 @@ def test_no_skipped_phantom_records(monkeypatch):
     from tilelang.backend.pass_pipeline import resolve_pipeline
     import tilelang.language as T
 
-    monkeypatch.setenv("TILELANG_LOWER_TRACE", "both")
-    monkeypatch.setenv("TILELANG_LOWER_TRACE_DIR", tempfile.mkdtemp(prefix="lt_test_"))
+    monkeypatch.setenv("TL_LOWER_TRACE", "both")
+    monkeypatch.setenv("TL_LOWER_TRACE_DIR", tempfile.mkdtemp(prefix="lt_test_"))
 
     uninstall()
     patch()
@@ -251,8 +251,8 @@ def test_no_skipped_phantom_records(monkeypatch):
     assert not letinline, f"Phantom LetInline records found: {letinline}"
 
     uninstall()
-    monkeypatch.delenv("TILELANG_LOWER_TRACE", raising=False)
-    monkeypatch.delenv("TILELANG_LOWER_TRACE_DIR", raising=False)
+    monkeypatch.delenv("TL_LOWER_TRACE", raising=False)
+    monkeypatch.delenv("TL_LOWER_TRACE_DIR", raising=False)
 
 
 if __name__ == "__main__":

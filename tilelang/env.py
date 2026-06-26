@@ -342,9 +342,9 @@ class Environment:
     TILELANG_DEFAULT_VERBOSE = EnvVar("TILELANG_VERBOSE", "0")
 
     # Lower trace debugging
-    TILELANG_LOWER_TRACE = EnvVar("TILELANG_LOWER_TRACE", "0")
-    TILELANG_LOWER_TRACE_DIR = EnvVar(
-        "TILELANG_LOWER_TRACE_DIR", "./tmp/lower_trace_output"
+    TL_LOWER_TRACE = EnvVar("TL_LOWER_TRACE", "0")
+    TL_LOWER_TRACE_DIR = EnvVar(
+        "TL_LOWER_TRACE_DIR", "./tmp/lower_trace_output"
     )
 
     # TVM integration
@@ -426,7 +426,7 @@ class Environment:
 
     def get_lower_trace_mode(self) -> str | None:
         """Return lower trace mode: None (off), 'terminal', 'html', or 'both'."""
-        value = str(self.TILELANG_LOWER_TRACE).lower().strip()
+        value = str(self.TL_LOWER_TRACE).lower().strip()
         if value in ("", "0", "false", "no", "off"):
             return None
         if value in ("1", "true", "yes", "on"):

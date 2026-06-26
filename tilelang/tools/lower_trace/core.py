@@ -12,9 +12,9 @@ Supports two architectures:
 
 Usage::
 
-    TILELANG_LOWER_TRACE=1 python my_kernel.py        # HTML report
-    TILELANG_LOWER_TRACE=terminal python my_kernel.py  # terminal diff only
-    TILELANG_LOWER_TRACE=both python my_kernel.py      # both terminal and HTML
+    TL_LOWER_TRACE=1 python my_kernel.py        # HTML report
+    TL_LOWER_TRACE=terminal python my_kernel.py  # terminal diff only
+    TL_LOWER_TRACE=both python my_kernel.py      # both terminal and HTML
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ _UNSCOPED_PHASE = "unscoped"
 
 
 def _parse_lower_trace_mode(value: str | None) -> str | None:
-    """Parse a TILELANG_LOWER_TRACE-style value into a mode string."""
+    """Parse a TL_LOWER_TRACE-style value into a mode string."""
     if value is None:
         return None
     v = value.lower().strip()
@@ -128,7 +128,7 @@ def _parse_lower_trace_mode(value: str | None) -> str | None:
 def _get_mode() -> str | None:
     if _mode_override is not _UNSET:
         return _mode_override  # type: ignore[return-value]
-    return _parse_lower_trace_mode(os.environ.get("TILELANG_LOWER_TRACE"))
+    return _parse_lower_trace_mode(os.environ.get("TL_LOWER_TRACE"))
 
 
 def _is_trace_enabled() -> bool:
@@ -150,7 +150,7 @@ def _get_base_trace_dir() -> str:
     if _trace_dir_override is not _UNSET and _trace_dir_override:
         return _trace_dir_override  # type: ignore[return-value]
     return (
-        os.environ.get("TILELANG_LOWER_TRACE_DIR")
+        os.environ.get("TL_LOWER_TRACE_DIR")
         or os.path.join(".", "tmp", "lower_trace_output")
     )
 
@@ -208,9 +208,6 @@ def _update_html_symlink(run_html_path: str):
 def _get_codegen_output_path() -> str | None:
     if _codegen_output_path_override is not _UNSET:
         return _codegen_output_path_override
-    env_val = os.environ.get("TILELANG_LOWER_TRACE_CODEGEN_OUTPUT")
-    if env_val is not None:
-        return env_val
     if _is_trace_enabled():
         script_dir = _ensure_script_dir()
         return os.path.join(script_dir, "codegen.cpp")
@@ -853,20 +850,19 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
     mode : str | None, optional
         Force a trace mode (``'terminal'``, ``'html'``, ``'both'``, or
         ``None`` to disable).  When omitted, the mode is read from the
-        ``TILELANG_LOWER_TRACE`` env var (or a prior ``patch`` override),
+        ``TL_LOWER_TRACE`` env var (or a prior ``patch`` override),
         keeping this module free of any ``tilelang.env`` dependency.
     trace_dir : str | None, optional
         Force the trace output base directory.  When omitted, falls back to
-        the ``TILELANG_LOWER_TRACE_DIR`` env var, then
+        the ``TL_LOWER_TRACE_DIR`` env var, then
         ``./tmp/lower_trace_output``.
     codegen_output : str | None, optional
         Path to save the codegen-generated C++/CUDA/etc. source code.  When
-        omitted, falls back to the ``TILELANG_LOWER_TRACE_CODEGEN_OUTPUT`` env
-        var, then ``<script_dir>/codegen.cpp`` (inside the per-script output
-        directory, beside ``run_records/``).  Pass ``None`` explicitly to
-        suppress all extra saves.  See ``_wrap_codegen_ffi`` for the three-file
-        (``<path>`` / ``<path>.original`` / ``<path>.latest``) patch-and-recompile
-        workflow.
+        omitted, defaults to ``<script_dir>/codegen.cpp`` (inside the
+        per-script output directory, beside ``run_records/``).  Pass ``None``
+        explicitly to suppress all extra saves.  See ``_wrap_codegen_ffi``
+        for the three-file (``<path>`` / ``<path>.original`` /
+        ``<path>.latest``) patch-and-recompile workflow.
     """
     global _mode_override, _trace_dir_override, _codegen_output_path_override
 
@@ -908,7 +904,7 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
 
         _original_pipeline_lower = PassPipeline.lower
         PassPipeline.lower = _traced_pipeline_lower
-        print("[lower_trace] IR pass tracing patched (PassPipeline architecture). Set TILELANG_LOWER_TRACE=1 to enable.")
+        print("[lower_trace] IR pass tracing patched (PassPipeline architecture). Set TL_LOWER_TRACE=1 to enable.")
         return
     except ImportError:
         pass
@@ -944,7 +940,7 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
     _legacy_patched = True
     print(
         f"[lower_trace] IR pass tracing patched (phase-based architecture, "
-        f"{len(phase_funcs)} phases). Set TILELANG_LOWER_TRACE=1 to enable."
+        f"{len(phase_funcs)} phases). Set TL_LOWER_TRACE=1 to enable."
     )
 
 

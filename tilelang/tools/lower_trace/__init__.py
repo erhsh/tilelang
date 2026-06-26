@@ -5,9 +5,9 @@ compilation pipeline with side-by-side IR diff for each pass.
 
 Usage::
 
-    TILELANG_LOWER_TRACE=1 python my_kernel.py        # HTML report
-    TILELANG_LOWER_TRACE=terminal python my_kernel.py  # terminal diff only
-    TILELANG_LOWER_TRACE=both python my_kernel.py      # both terminal and HTML
+    TL_LOWER_TRACE=1 python my_kernel.py        # HTML report
+    TL_LOWER_TRACE=terminal python my_kernel.py  # terminal diff only
+    TL_LOWER_TRACE=both python my_kernel.py      # both terminal and HTML
 
 Programmatic API::
 
