@@ -216,9 +216,9 @@ if not env.is_light_import():
 
     _lt_value = os.environ.get("TL_LOWER_TRACE", "")
     if _lt_value and _lt_value.lower().strip() not in ("0", "false", "no", "off", ""):
-        from .tools.lower_trace import patch as _lower_trace_patch
+        from .tools.lower_trace import enable as _lower_trace_enable
 
-        _lower_trace_patch()
+        _lower_trace_enable()
     del _lt_value
 del _lazy_load_lib
 

@@ -279,15 +279,15 @@ For fine-grained control, IR Lower Trace exposes two layers of API.
 Diff a fixed chain of passes against an IR module without installing any global hook:
 
 ```python
-from tilelang.tools.lower_trace import lower_trace
+from tilelang.tools import lower_trace as lt
 from tilelang import tvm
 import tilelang.transform as transform
 
 # Diff a single pass
-results = lower_trace(func, transform.Simplify(), mode="terminal")
+results = lt.lower_trace(func, transform.Simplify(), mode="terminal")
 
 # Diff a named chain, write an HTML report
-results = lower_trace(
+results = lt.lower_trace(
     func,
     [
         ("Annotate",   tvm.tirx.transform.AnnotateDeviceRegions()),
@@ -309,20 +309,20 @@ results = lower_trace(
 
 Returns a `list[dict]` with one entry per pass step, each containing `name`, `before_script`, `after_script`, `diff_lines`, `insertions`, `deletions`, and `changed`.
 
-#### Global hook: `patch()` / `uninstall()` / `reset()`
+#### Global hook: `enable()` / `disable()` / `reset()`
 
 To trace the *entire* compilation pipeline of a real kernel (what the environment variable does, but programmatically):
 
 ```python
-from tilelang.tools.lower_trace import patch
+from tilelang.tools import lower_trace as lt
 
-# Activate tracing for the rest of the process.
-patch(mode="both", trace_dir="./my_trace", codegen_output="./my_trace/codegen.cpp")
+# Enable tracing for the rest of the process.
+lt.enable(mode="both")
 
 # ... run tilelang.compile() / kernel compilation ...
 ```
 
-That's all — when the process exits, an `atexit` handler automatically flushes the final HTML report. Neither `reset()` nor `uninstall()` is required for the common one-shot workflow.
+All three parameters of `lt.enable()` are optional — `mode`, `trace_dir`, and `codegen_output` fall back to the `TL_LOWER_TRACE` / `TL_LOWER_TRACE_DIR` env vars (or sensible defaults) when omitted. See the parameter table below for details.
 
 | Parameter | Description |
 |-----------|-------------|
@@ -330,38 +330,38 @@ That's all — when the process exits, an `atexit` handler automatically flushes
 | `trace_dir` | Base output directory. When omitted, falls back to `TL_LOWER_TRACE_DIR`, then `./tmp/lower_trace_dir`. |
 | `codegen_output` | Path to save the generated codegen source (enables the edit-recompile workflow). When omitted, defaults to `<script_dir>/codegen.cpp`. Pass `None` explicitly to suppress. |
 
-`patch()` is idempotent — calling it multiple times is safe.
+`enable()` is idempotent — calling it multiple times is safe.
 
-##### When to use `reset()` and `uninstall()`
+##### When to use `reset()` and `disable()`
 
 Both are **optional** and only needed in specific scenarios:
 
 | Function | When to call | What it does |
 |----------|--------------|--------------|
 | `reset()` | Compiling **multiple kernels in the same process** and you want each kernel's report to start fresh (instead of accumulating into one combined report) | Clears collected records while keeping the hook active. Without it, records accumulate across compilations, tagged with `run2_`, `run3_`, … prefixes — which is desirable if you *want* to compare runs side by side. |
-| `uninstall()` | You want to **disable tracing for subsequent compilations** within the same process (e.g. a long-running service that only traces the first kernel) | Restores the original `Pass.__call__`, `PassPipeline.lower`, and codegen FFIs, and clears all state. |
+| `disable()` | You want to **disable tracing for subsequent compilations** within the same process (e.g. a long-running service that only traces the first kernel) | Restores the original `Pass.__call__`, `PassPipeline.lower`, and codegen FFIs, and clears all state. |
 
 ```python
-from tilelang.tools.lower_trace import patch, reset, uninstall
+from tilelang.tools import lower_trace as lt
 
-patch(mode="both")
+lt.enable(mode="both")
 
 # First kernel — traced.
 kernel1 = tilelang.compile(func_a)
 
 # Optional: clear records so kernel2 gets its own clean report.
 # Omit this line if you prefer a combined multi-run report.
-reset()
+lt.reset()
 
-# Second kernel — traced (into a fresh report if reset() was called).
+# Second kernel — traced (into a fresh report if lt.reset() was called).
 kernel2 = tilelang.compile(func_b)
 
 # Optional: disable tracing for any further compilations.
-uninstall()
+lt.disable()
 ```
 
 :::{note}
-If neither `reset()` nor `uninstall()` is called, tracing stays active for the lifetime of the process and the final HTML report is generated automatically at exit. This is the simplest workflow and is sufficient for most one-off scripts.
+If neither `lt.reset()` nor `lt.disable()` is called, tracing stays active for the lifetime of the process and the final HTML report is generated automatically at exit. This is the simplest workflow and is sufficient for most one-off scripts.
 :::
 
 ### HTML Report Features
@@ -419,12 +419,12 @@ On each run a three-way comparison (baseline / working copy / current codegen ou
    - If both your edits and codegen changed and they differ → `CONFLICT`. Your working copy is backed up to `codegen.cpp.bak` and the old baseline to `codegen.cpp.original.bak`. Recover your edits with `diff codegen.cpp.original.bak codegen.cpp.bak`, then re-apply them against the freshly regenerated `codegen.cpp`.
 
 :::{note}
-The `codegen_output` path defaults to `<script_dir>/codegen.cpp` when tracing is enabled. To disable codegen-to-disk entirely, pass `codegen_output=None` to `patch()`.
+The `codegen_output` path defaults to `<script_dir>/codegen.cpp` when tracing is enabled. To disable codegen-to-disk entirely, pass `codegen_output=None` to `enable()`.
 :::
 
 ### How It Works
 
-IR Lower Trace installs three layers of transparent hooks (all via `monkey-patch`, restored by `uninstall()`):
+IR Lower Trace installs three layers of transparent hooks (all via `monkey-patch`, restored by `disable()`):
 
 1. **`tvm.ir.transform.Pass.__call__`** — every pass invocation is intercepted to capture `str(mod)` before and after, compute `+`/`−` line counts, and append a `LowerRecord`. Passes that run outside any pipeline window are tagged with the `unscoped` phase.
 2. **`PassPipeline.lower`** (new architecture) or **phase functions** (legacy architecture) — sets the current phase context so passes invoked within a pipeline run are grouped under a label like `pipeline_c`. Legacy phase functions are discovered via AST scanning (`_discover_passes`) and bytecode inspection.

@@ -4,7 +4,7 @@ Monkey-patches ``tvm.ir.transform.Pass.__call__`` and ``PassPipeline.lower``
 to automatically capture IR before/after every pass and generate diff reports.
 
 This module has **no dependency on ``tilelang.env``**; configuration is read
-from ``os.environ`` directly, or passed programmatically via ``patch()``.
+from ``os.environ`` directly, or passed programmatically via ``enable()``.
 
 Supports two architectures:
 - New: ``PassPipeline.lower`` (each backend registers a pipeline object)
@@ -842,15 +842,15 @@ def _register_atexit():
     _atexit_registered = True
 
 
-def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
-    """Activate IR pass tracing via monkey-patching.
+def enable(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
+    """Enable IR pass tracing via monkey-patching.
 
     Parameters
     ----------
     mode : str | None, optional
         Force a trace mode (``'terminal'``, ``'html'``, ``'both'``, or
         ``None`` to disable).  When omitted, the mode is read from the
-        ``TL_LOWER_TRACE`` env var (or a prior ``patch`` override),
+        ``TL_LOWER_TRACE`` env var (or a prior ``enable`` override),
         keeping this module free of any ``tilelang.env`` dependency.
     trace_dir : str | None, optional
         Force the trace output base directory.  When omitted, falls back to
@@ -904,7 +904,7 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
 
         _original_pipeline_lower = PassPipeline.lower
         PassPipeline.lower = _traced_pipeline_lower
-        print("[lower_trace] IR pass tracing patched (PassPipeline architecture). Set TL_LOWER_TRACE=1 to enable.")
+        print("[lower_trace] IR pass tracing enabled (PassPipeline architecture). Set TL_LOWER_TRACE=1 to enable.")
         return
     except ImportError:
         pass
@@ -920,7 +920,7 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
 
             import tilelang.engine as patch_mod
         except (ImportError, AttributeError) as e:
-            print(f"[lower_trace] WARNING: could not patch — {e}")
+            print(f"[lower_trace] WARNING: could not enable tracing — {e}")
             return
 
     phase_funcs = _discover_phases(lower_func)
@@ -939,7 +939,7 @@ def patch(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
 
     _legacy_patched = True
     print(
-        f"[lower_trace] IR pass tracing patched (phase-based architecture, "
+        f"[lower_trace] IR pass tracing enabled (phase-based architecture, "
         f"{len(phase_funcs)} phases). Set TL_LOWER_TRACE=1 to enable."
     )
 
@@ -959,7 +959,7 @@ def _final_report():
         print(f"  {_ANSI_RED}[lower_trace] WARNING: failed to generate final HTML report: {exc}{_ANSI_RESET}")
 
 
-def uninstall():
+def disable():
     """Remove the pass tracing hook and restore original behavior."""
     global _original_pass_call, _original_pipeline_lower, _atexit_registered, _run_counter, _legacy_patched
     global _mode_override, _trace_dir_override, _codegen_output_path_override, _script_dir, _run_dir

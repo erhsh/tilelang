@@ -23,13 +23,13 @@
 
 ```
 tilelang/tools/lower_trace/
-├── __init__.py        # 公开 API：patch, uninstall, reset, lower_trace, LowerRecord, STATUS_*
+├── __init__.py        # 公开 API：enable, disable, reset, lower_trace, LowerRecord, STATUS_*
 ├── core.py            # monkey-patch / AST pass 发现 / phase 管理 / 全局状态
 ├── diff.py            # terminal + HTML diff + 空白差异合并 + 内联高亮
 └── html.py            # HTML 报告生成（嵌入式 CSS/JS，增量写入）
 
 testing/python/debug/test_lower_trace.py  # 最小集成测试
-tilelang/__init__.py                       # 集成 patch()
+tilelang/__init__.py                       # 集成 enable()
 docs/tutorials/debug_tools_for_tilelang.md # 更新文档
 ```
 
@@ -130,11 +130,11 @@ TL_LOWER_TRACE_DIR   # 输出根目录, 默认 ./tmp/lower_trace_dir
 
 ```python
 # tilelang/tools/lower_trace/__init__.py
-from .core import patch, uninstall, reset, LowerRecord
+from .core import enable, disable, reset, LowerRecord
 from .core import STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED
 
 __all__ = [
-    "patch", "uninstall", "reset", "lower_trace",
+    "enable", "disable", "reset", "lower_trace",
     "LowerRecord", "STATUS_COMPLETED", "STATUS_FAILED", "STATUS_SKIPPED",
 ]
 
@@ -149,9 +149,9 @@ def lower_trace(func_or_mod, passes, *, mode="terminal", context=3,
 
 | 函数 | 职责 |
 |------|------|
-| `patch()` | 双层 monkey-patch + 架构自适应 + atexit 注册 |
-| `uninstall()` | 恢复原始函数，清空状态 |
-| `reset()` | 清空 records（保留 patch） |
+| `enable()` | 双层 monkey-patch + 架构自适应 + atexit 注册 |
+| `disable()` | 恢复原始函数，清空状态 |
+| `reset()` | 清空 records（保留 enable） |
 | `_traced_pass_call(self, mod)` | 拦截 Pass.__call__，捕获 before/after |
 | `_traced_pipeline_lower(self, mod, target)` | 新架构入口，预注册 passes |
 | `_wrap_phase(orig_func, phase_idx, total)` | 旧架构 phase 函数装饰器 |
@@ -221,9 +221,9 @@ if not env.is_light_import():
     ...  # existing backend imports
 
     if _is_lower_trace_enabled():  # 直接读 os.environ["TL_LOWER_TRACE"]
-        from .tools.lower_trace import patch as _lower_trace_patch
-        _lower_trace_patch()
-        del _lower_trace_patch
+        from .tools.lower_trace import enable as _lower_trace_enable
+        _lower_trace_enable()
+        del _lower_trace_enable
     del _is_lower_trace_enabled
 ```
 
@@ -246,14 +246,14 @@ def test_lower_trace_api_single_pass():
 def test_lower_trace_api_chain():
     """链式 passes 返回正确数量和命名"""
 
-def test_patch_uninstall():
-    """patch → uninstall 生命周期正确（无残留状态）"""
+def test_enable_disable():
+    """enable → disable 生命周期正确（无残留状态）"""
 
 def test_html_output():
     """生成 HTML 文件，检查内容含 pass 名、CHANGED/NO-OP 等关键字"""
 
 def test_crash_status():
-    """patch 后触发抛异常的 pass，STATUS_FAILED 正确标记"""
+    """enable 后触发抛异常的 pass，STATUS_FAILED 正确标记"""
 
 def test_discover_passes():
     """AST 发现能在简单函数中提取 pass 名称"""
@@ -268,7 +268,7 @@ def test_discover_passes():
 | 1 | 创建模块骨架 + LowerRecord + STATUS 常量 | 无 |
 | 2 | 实现 diff.py | Step 1 |
 | 3 | 实现 html.py + 增量写入逻辑 | Step 2 |
-| 4 | 实现 core.py（patch/traced_pass_call/AST 发现） | Step 3 |
+| 4 | 实现 core.py（enable/traced_pass_call/AST 发现） | Step 3 |
 | 5 | 接入 env.py | Step 4 |
 | 6 | 接入 __init__.py | Step 5 |
 | 7 | 实现 lower_trace() 公开 API | Step 4 |
@@ -285,7 +285,7 @@ def test_discover_passes():
 |------|------|
 | AST 发现对 `tirx.transform` / `tilelang.transform` / `s_tir.transform` 匹配不全 | AST visitor 同时识别三种前缀；测试覆盖已知 pipeline |
 | `str(mod)` vs `.script()` 选择不当 | 默认 `str(mod)`（更快、更稳定） |
-| 首次 patch 时 backend 未 import 完 | __init__.py 中 backend 导入后再 patch |
+| 首次 enable 时 backend 未 import 完 | __init__.py 中 backend 导入后再 enable |
 | PassPipeline.lower 已被其他代码 monkey-patch | 检查 `_original_pipeline_lower is not None` 防重复 + warning |
 | HTML 中 IR 文本过大 | 默认 context=3，仅展开 changes；全 IR 隐藏按需展开 |
 | 并发编译 records 覆盖 | `reset()` 在 `_traced_pipeline_lower` 开始时调用 |

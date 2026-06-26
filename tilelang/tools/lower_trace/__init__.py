@@ -19,11 +19,11 @@ Programmatic API::
 
 from __future__ import annotations
 
-from .core import patch, uninstall, reset, LowerRecord, STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED, STATUS_CODEGEN
+from .core import enable, disable, reset, LowerRecord, STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED, STATUS_CODEGEN
 
 __all__ = [
-    "patch",
-    "uninstall",
+    "enable",
+    "disable",
     "reset",
     "lower_trace",
     "LowerRecord",

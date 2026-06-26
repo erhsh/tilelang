@@ -90,11 +90,11 @@ def test_lower_trace_api_chain():
     assert results[1]["name"] == "Simplify2"
 
 
-def test_patch_uninstall():
-    from tilelang.tools.lower_trace import patch, uninstall
+def test_enable_disable():
+    from tilelang.tools.lower_trace import enable, disable
 
-    patch()
-    uninstall()
+    enable()
+    disable()
 
 
 def test_lower_trace_html():
@@ -149,7 +149,7 @@ def test_lower_trace_dark_theme():
 
 
 def test_multi_run_accumulation(monkeypatch):
-    from tilelang.tools.lower_trace import patch, uninstall
+    from tilelang.tools.lower_trace import enable, disable
     from tilelang.tools.lower_trace import core as _core
     from tilelang.backend.pass_pipeline import resolve_pipeline
     import tilelang.language as T
@@ -157,8 +157,8 @@ def test_multi_run_accumulation(monkeypatch):
     monkeypatch.setenv("TL_LOWER_TRACE", "both")
     monkeypatch.setenv("TL_LOWER_TRACE_DIR", tempfile.mkdtemp(prefix="lt_test_"))
 
-    uninstall()
-    patch()
+    disable()
+    enable()
 
     @T.prim_func
     def tiny(A: T.Tensor((32,), "float32"), B: T.Tensor((32,), "float32")):
@@ -170,7 +170,7 @@ def test_multi_run_accumulation(monkeypatch):
     target = tvm.target.Target("c")
     pipeline = resolve_pipeline(target)
 
-    assert _core._run_counter == 0, f"Expected run_counter=0 before patch, got {_core._run_counter}"
+    assert _core._run_counter == 0, f"Expected run_counter=0 before enable, got {_core._run_counter}"
 
     pipeline.lower(mod, target)
     run1_count = len(_core._records)
@@ -186,7 +186,7 @@ def test_multi_run_accumulation(monkeypatch):
     assert "pipeline_c" in phases, "First run should have phase 'pipeline_c'"
     assert "run2_pipeline_c" in phases, "Second run should have phase 'run2_pipeline_c'"
 
-    uninstall()
+    disable()
     monkeypatch.delenv("TL_LOWER_TRACE", raising=False)
     monkeypatch.delenv("TL_LOWER_TRACE_DIR", raising=False)
 
@@ -216,7 +216,7 @@ def test_diff_html_line_numbers_monotone():
 
 def test_no_skipped_phantom_records(monkeypatch):
     """Pre-registration is gone: no SKIPPED records, indices global-monotonic."""
-    from tilelang.tools.lower_trace import patch, uninstall
+    from tilelang.tools.lower_trace import enable, disable
     from tilelang.tools.lower_trace import core as _core
     from tilelang.tools.lower_trace.core import STATUS_SKIPPED
     from tilelang.backend.pass_pipeline import resolve_pipeline
@@ -225,8 +225,8 @@ def test_no_skipped_phantom_records(monkeypatch):
     monkeypatch.setenv("TL_LOWER_TRACE", "both")
     monkeypatch.setenv("TL_LOWER_TRACE_DIR", tempfile.mkdtemp(prefix="lt_test_"))
 
-    uninstall()
-    patch()
+    disable()
+    enable()
 
     @T.prim_func
     def tiny(A: T.Tensor((32,), "float32"), B: T.Tensor((32,), "float32")):
@@ -252,7 +252,7 @@ def test_no_skipped_phantom_records(monkeypatch):
     letinline = [r for r in _core._records if "LetInline" in r.name]
     assert not letinline, f"Phantom LetInline records found: {letinline}"
 
-    uninstall()
+    disable()
     monkeypatch.delenv("TL_LOWER_TRACE", raising=False)
     monkeypatch.delenv("TL_LOWER_TRACE_DIR", raising=False)
 
