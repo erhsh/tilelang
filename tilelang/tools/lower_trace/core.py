@@ -176,7 +176,7 @@ def _ensure_script_dir() -> str:
 
 
 def _ensure_run_dir() -> str:
-    """Return ``<script_dir>/run_records/run_<timestamp>_<pid>/`` (new per run)."""
+    """Return ``<script_dir>/.run_records/run_<timestamp>_<pid>/`` (new per run)."""
     global _run_dir
 
     if _run_dir is not None:
@@ -186,7 +186,7 @@ def _ensure_run_dir() -> str:
 
     script_dir = _ensure_script_dir()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    _run_dir = os.path.join(script_dir, "run_records", f"run_{timestamp}_{os.getpid()}")
+    _run_dir = os.path.join(script_dir, ".run_records", f"run_{timestamp}_{os.getpid()}")
 
     os.makedirs(_run_dir, exist_ok=True)
     return _run_dir
@@ -901,7 +901,7 @@ def enable(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
     codegen_output : str | None, optional
         Path to save the codegen-generated C++/CUDA/etc. source code.  When
         omitted, defaults to ``<script_dir>/codegen.cpp`` (inside the
-        per-script output directory, beside ``run_records/``).  Pass ``None``
+        per-script output directory, beside ``.run_records/``).  Pass ``None``
         explicitly to suppress all extra saves.  See ``_wrap_codegen_ffi``
         for the three-file (``<path>`` / ``<path>.original`` /
         ``<path>.latest``) patch-and-recompile workflow.

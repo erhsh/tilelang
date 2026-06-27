@@ -253,7 +253,7 @@ A single run produces the following layout under `TL_LOWER_TRACE_DIR`:
     ├── codegen.cpp                     # generated codegen source (editable, see below)
     ├── codegen.cpp.original            # baseline snapshot for edit/recompile workflow
     ├── codegen.cpp.latest              # actual codegen output of the most recent run
-    └── run_records/
+    └── .run_records/
         └── run_<YYYYMMDD_HHMMSS_ffffff>_<pid>/
             ├── report.html        # this run's full report
             ├── pipeline_c/             # one subdir per phase
