@@ -95,6 +95,42 @@ _CODEGEN_FFI_NAMES: list[str] = [
     "target.build.llvm",
     "target.build.webgpu",
 ]
+
+# FFIs whose returned module is consumed *only* via ``inspect_source()`` — i.e.
+# the module holds source text (C / WGSL / etc.), not a compiled binary, and is
+# never passed to ``host_mod.import_module()``.  For these FFIs a
+# ``_CodegenSourceProxy`` can be safely returned in place of the real module so
+# that the downstream JIT adapter (NVRTC / Cython / CuTeDSL) recompiles the
+# user-edited source.
+#
+# Membership is determined by tracing the call sites in
+# ``tilelang.engine.lower``:
+# - ``*_without_compile`` FFIs are only called from ``device_codegen_without_compile``
+#   (which sets ``enable_device_compile=False`` → ``enable_host_codegen=False``),
+#   so the result is never passed to ``import_module``.
+# - ``tilelang_c`` and ``webgpu`` produce ``CSourceModule`` / ``WebGPUModule``
+#   (source-only, no binary compilation step); they are likewise only called from
+#   ``device_codegen_without_compile``.
+# - ``tilelang_metal`` is dual-use: called from both ``device_codegen``
+#   (full-compile → ``import_module``) and ``device_codegen_without_compile``
+#   (source-only).  Since the wrapper cannot distinguish the two call sites
+#   at runtime, it is conservatively excluded.
+# - ``llvm``, ``tilelang_c_host`` are excluded because they may be reached
+#   via ``host_codegen`` → ``import_module`` (the module's binary or source
+#   is consumed by the host runtime module tree).
+# - ``tilelang_cuda``, ``tilelang_hip``, ``tilelang_cutedsl`` (full-compile
+#   variants) produce binary modules consumed via ``import_module``.
+#
+# New FFIs default to *not* being in this set (conservative: return real module
+# + NOTE), and must be explicitly added here once their call chain is verified
+# to be source-only.
+_SOURCE_ONLY_CODEGEN_FFIS: frozenset[str] = frozenset({
+    "target.build.tilelang_cuda_without_compile",
+    "target.build.tilelang_cutedsl_without_compile",
+    "target.build.tilelang_hip_without_compile",
+    "target.build.tilelang_c",
+    "target.build.webgpu",
+})
 _current_phase: str | None = None
 _pass_index: int = 0
 _auto_flush: bool = False
@@ -670,8 +706,45 @@ def _traced_pipeline_lower(self, mod, target):
     return result
 
 
-def _wrap_codegen_ffi(original_build):
+class _CodegenSourceProxy:
+    """Proxy returned when codegen source is patched from the user-edited working copy.
+
+    Only exposes ``inspect_source``/``get_source`` because the ``_without_compile``
+    codegen FFIs (e.g. ``tilelang_cuda_without_compile``) produce modules whose
+    sole consumer is ``inspect_source()`` — called in ``tilelang.engine.lower``
+    to populate ``kernel_source``.  The downstream JIT adapter (NVRTC / Cython /
+    CuTeDSL) then compiles that source string at runtime, so returning this
+    proxy in place of the real module is safe and causes the user's edits to
+    be compiled.
+
+    For full-compile FFIs (e.g. ``tilelang_cuda``) the real module is returned
+    instead, because its binary payload (PTX/hsaco) was compiled from TIR and
+    cannot be patched from C++ source without a full recompilation.
+    """
+
+    def __init__(self, source: str):
+        self._source = source
+
+    def inspect_source(self) -> str:
+        return self._source
+
+    def get_source(self) -> str:
+        return self._source
+
+
+def _wrap_codegen_ffi(original_build, ffi_name=""):
     """Return a wrapper around a codegen FFI build function (``target.build.*``).
+
+    Parameters
+    ----------
+    original_build : Callable
+        The original codegen FFI function.
+    ffi_name : str
+        The registered FFI name (e.g. ``target.build.tilelang_cuda``).
+        Used to decide whether a ``_CodegenSourceProxy`` can be returned
+        (safe for ``*_without_compile`` FFIs) or the real module must be
+        returned (required for full-compile FFIs whose binary is consumed
+        downstream via ``host_mod.import_module``).
 
     The wrapper:
     1. Captures the final lowered TIR right before codegen runs (``str(mod)``).
@@ -703,10 +776,21 @@ def _wrap_codegen_ffi(original_build):
     - both changed, working!=    → CONFLICT: back up the user's working copy
       current                     to ``<path>.bak`` and the old baseline to
                                    ``<path>.original.bak``, then regenerate
-                                   ``<path>`` and ``.original`` from the new
+                                   ``<path>`` and ``<path>.original`` from the new
                                    codegen and compile with it.  The user can
                                    recover their edits via
                                    ``diff(<path>.original.bak, <path>.bak)``.
+
+    When the working copy is injected (PATCHED / SYNCED), the return value
+    depends on whether the FFI is in ``_SOURCE_ONLY_CODEGEN_FFIS``:
+    - Source-only FFIs (``*_without_compile``, ``tilelang_c``, ``webgpu``)
+      → return ``_CodegenSourceProxy`` so the downstream JIT adapter
+      (NVRTC / Cython / CuTeDSL) recompiles the edited source.
+    - Full-compile FFIs (``tilelang_cuda``, ``tilelang_hip``, ``tilelang_metal``,
+      ``llvm``, ``tilelang_c_host``, …) → return the original ``result``
+      (whose binary was compiled from TIR) and print a NOTE advising the
+      user to switch to a source-compiling execution backend (e.g.
+      ``nvrtc``) for edit-and-recompile support.
     """
 
     @functools.wraps(original_build)
@@ -860,13 +944,39 @@ def _wrap_codegen_ffi(original_build):
 
             print_diff(before_text, after_text, "codegen (TIR before)", "codegen (C++ after)")
 
-        if patched_text is not None and patched_text.rstrip() != codegen_text.rstrip():
-            print(
-                f"  [lower_trace] codegen/{idx:02d}_codegen: NOTE — user edits in "
-                f"{_ANSI_YELLOW}{codegen_out_path}{_ANSI_RESET} are recorded in the trace for diff viewing, but were NOT "
-                f"recompiled (the codegen FFI builds from TIR, not from C++ source). The compiled "
-                f"artifact reflects the unpatched codegen output."
-            )
+        if patched_text is not None:
+            if ffi_name in _SOURCE_ONLY_CODEGEN_FFIS:
+                # Source-only FFIs produce modules whose sole consumer is
+                # inspect_source(); the downstream JIT adapter (NVRTC/Cython/
+                # CuTeDSL) recompiles the source string, so returning a proxy
+                # is safe and causes the user's edits to be compiled.
+                return _CodegenSourceProxy(patched_text)
+            else:
+                # Full-compile FFIs return a module whose binary (PTX/hsaco)
+                # was compiled from TIR and is consumed downstream via
+                # host_mod.import_module().  A pure-Python proxy cannot be
+                # used here (the FFI boundary requires a real Module handle),
+                # so the unpatched module is returned.  Only the trace/display
+                # text reflects the user's edits.
+                if patched_text.rstrip() != codegen_text.rstrip():
+                    target_kind = ""
+                    try:
+                        _t = args[1] if len(args) > 1 else kwargs.get("target", "")
+                        target_kind = _t.kind.name
+                    except Exception:
+                        pass
+                    backend_hint = ""
+                    if target_kind == "cuda":
+                        backend_hint = " Use execution_backend='nvrtc' for edit-and-recompile support."
+                    elif target_kind == "hip":
+                        backend_hint = " Use execution_backend='cython' for edit-and-recompile support."
+                    print(
+                        f"  {_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_codegen: NOTE — "
+                        f"user edits in {codegen_out_path} are recorded in the trace for diff "
+                        f"viewing, but were NOT recompiled (the codegen FFI builds from TIR, "
+                        f"not from C++ source). The compiled artifact reflects the unpatched "
+                        f"codegen output.{backend_hint}{_ANSI_RESET}"
+                    )
 
         return result
 
@@ -939,8 +1049,7 @@ def enable(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
             try:
                 orig = tvm.ffi.get_global_func(ffi_name)
                 if orig is not None:
-                    wrapped = _wrap_codegen_ffi(orig)
-                    wrapped._original_ffi_name = ffi_name
+                    wrapped = _wrap_codegen_ffi(orig, ffi_name)
                     _original_codegen_ffis[ffi_name] = orig
                     tvm.ffi.register_global_func(ffi_name, wrapped, override=True)
             except Exception as exc:

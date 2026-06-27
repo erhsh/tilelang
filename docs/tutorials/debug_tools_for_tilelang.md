@@ -419,6 +419,20 @@ On each run a three-way comparison (baseline / working copy / current codegen ou
    - If both your edits and codegen changed and they differ → `CONFLICT`. Your working copy is backed up to `codegen.cpp.bak` and the old baseline to `codegen.cpp.original.bak`. Recover your edits with `diff codegen.cpp.original.bak codegen.cpp.bak`, then re-apply them against the freshly regenerated `codegen.cpp`.
 
 :::{note}
+**Backend requirements for edit-and-recompile.** The edit-and-recompile workflow requires a source-compiling execution backend — `nvrtc`, `cython`, or `cutedsl`. These backends use `*_without_compile` codegen FFIs that produce source-only modules, then compile the (edited) source string at runtime via NVRTC / Cython / CuTeDSL.
+
+The default `tvm_ffi` backend pre-compiles device code to a binary (PTX/hsaco) from TIR during codegen. When the `tvm_ffi` backend is active and you edit `codegen.cpp`, you'll see a `NOTE` message indicating that your edits are recorded in the trace for diff viewing but were **not recompiled**. To use edit-and-recompile, switch to a source-compiling backend:
+
+```python
+# For CUDA targets:
+tilelang.compile(..., execution_backend="nvrtc")
+
+# For HIP targets:
+tilelang.compile(..., execution_backend="cython")
+```
+:::
+
+:::{note}
 The `codegen_output` path defaults to `<script_dir>/codegen.cpp` when tracing is enabled. To disable codegen-to-disk entirely, pass `codegen_output=None` to `enable()`.
 :::
 
