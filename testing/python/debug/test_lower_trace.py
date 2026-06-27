@@ -16,11 +16,11 @@ from tilelang.tools.lower_trace import core as _core
 def _isolate_env(monkeypatch):
     monkeypatch.delenv("TL_LOWER_TRACE", raising=False)
     monkeypatch.delenv("TL_LOWER_TRACE_DIR", raising=False)
-    monkeypatch.setattr(_core, "_mode_override", _core._UNSET)
+    _core.disable()
     yield
+    _core.disable()
     monkeypatch.delenv("TL_LOWER_TRACE", raising=False)
     monkeypatch.delenv("TL_LOWER_TRACE_DIR", raising=False)
-    monkeypatch.setattr(_core, "_mode_override", _core._UNSET)
 
 
 def _simple_program():

@@ -19,7 +19,17 @@ Programmatic API::
 
 from __future__ import annotations
 
-from .core import enable, disable, reset, LowerRecord, STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED, STATUS_CODEGEN
+from .core import (
+    enable,
+    disable,
+    reset,
+    LowerRecord,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_SKIPPED,
+    STATUS_CODEGEN,
+    _get_pass_display_name,
+)
 
 __all__ = [
     "enable",
@@ -84,7 +94,7 @@ def lower_trace(
         if isinstance(p, (list, tuple)) and len(p) == 2:
             named_passes.append((str(p[0]), p[1]))
         else:
-            named_passes.append((type(p).__name__, p))
+            named_passes.append((_get_pass_display_name(p), p))
 
     results: list[dict] = []
 

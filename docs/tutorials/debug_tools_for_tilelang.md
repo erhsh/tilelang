@@ -246,7 +246,7 @@ open tmp/lower_trace_dir/my_script/report.html
 
 A single run produces the following layout under `TL_LOWER_TRACE_DIR`:
 
-```
+```text
 <TL_LOWER_TRACE_DIR>/
 └── <script_name>/                      # derived from sys.argv[0], e.g. "my_script"
     ├── report.html                # symlink → latest run's report

@@ -26,6 +26,7 @@ import dis
 import functools
 import inspect
 import os
+import re
 import shutil
 import sys
 import threading
@@ -70,11 +71,14 @@ class LowerRecord:
 
 
 _records: list[LowerRecord] = []
-_section_cache: list[str] = []
+_section_cache: dict[tuple[str, int], str] = {}
 _original_pass_call: Callable | None = None
 _original_pipeline_lower: object | None = None
 _original_codegen_ffis: dict[str, Callable] = {}
 _legacy_patched: bool = False
+# (target, attr_name, original_or_MISSING, is_dict) — restored by disable()
+_legacy_phase_originals: list[tuple[object, str, object, bool]] = []
+_MISSING: object = object()
 
 _CODEGEN_FFI_NAMES: list[str] = [
     "target.build.tilelang_cuda",
@@ -126,21 +130,25 @@ def _parse_lower_trace_mode(value: str | None) -> str | None:
 
 
 def _get_mode() -> str | None:
+    """Return the effective trace mode, preferring the programmatic override then the env var."""
     if _mode_override is not _UNSET:
         return _mode_override  # type: ignore[return-value]
     return _parse_lower_trace_mode(os.environ.get("TL_LOWER_TRACE"))
 
 
 def _is_trace_enabled() -> bool:
+    """Return True when tracing is currently active (mode is not None)."""
     return _get_mode() is not None
 
 
 def _should_print_terminal() -> bool:
+    """Return True when the terminal diff output should be produced."""
     mode = _get_mode()
     return mode in ("terminal", "both")
 
 
 def _should_gen_html() -> bool:
+    """Return True when the HTML report should be produced."""
     mode = _get_mode()
     return mode in ("html", "both")
 
@@ -203,6 +211,7 @@ def _update_html_symlink(run_html_path: str):
 
 
 def _get_codegen_output_path() -> str | None:
+    """Return the configured codegen source output path, or None when tracing is off."""
     if _codegen_output_path_override is not _UNSET:
         return _codegen_output_path_override
     if _is_trace_enabled():
@@ -211,23 +220,39 @@ def _get_codegen_output_path() -> str | None:
     return None
 
 
+def _safe_filename_component(name: str) -> str:
+    """Sanitize a record-derived name for use as a path component.
+
+    Replaces path separators and other filesystem-unsafe characters so that a
+    custom pass/phase name cannot escape its phase subdirectory (CWE-22).
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(name))
+
+
 def _save_raw_files(record: LowerRecord):
     """Write before/after files to disk (phase subdirectory layout).
 
     For codegen records the *after* text is C++ source, so we write ``*.cpp``
     instead of ``*.tir``.
-    """
-    trace_dir = _ensure_run_dir()
-    phase_dir = os.path.join(trace_dir, record.phase)
-    os.makedirs(phase_dir, exist_ok=True)
 
-    prefix = f"{record.index:02d}_{record.name}"
-    before_ext = ".tir"
-    after_ext = ".cpp" if record.status == STATUS_CODEGEN else ".tir"
-    with open(os.path.join(phase_dir, f"{prefix}_before{before_ext}"), "w") as f:
-        f.write(record.before_text)
-    with open(os.path.join(phase_dir, f"{prefix}_after{after_ext}"), "w") as f:
-        f.write(record.after_text)
+    Persistence is best-effort: any filesystem failure (unwritable
+    ``TL_LOWER_TRACE_DIR``, bad filename, transient error) degrades to a
+    warning so the observational tracing flow never aborts compilation.
+    """
+    try:
+        trace_dir = _ensure_run_dir()
+        phase_dir = os.path.join(trace_dir, _safe_filename_component(record.phase))
+        os.makedirs(phase_dir, exist_ok=True)
+
+        prefix = f"{record.index:02d}_{_safe_filename_component(record.name)}"
+        before_ext = ".tir"
+        after_ext = ".cpp" if record.status == STATUS_CODEGEN else ".tir"
+        with open(os.path.join(phase_dir, f"{prefix}_before{before_ext}"), "w") as f:
+            f.write(record.before_text)
+        with open(os.path.join(phase_dir, f"{prefix}_after{after_ext}"), "w") as f:
+            f.write(record.after_text)
+    except Exception as exc:
+        print(f"  {_ANSI_RED}[lower_trace] WARNING: could not save raw trace files: {exc}{_ANSI_RESET}")
 
 
 def _get_pass_display_name(pass_obj) -> str:
@@ -242,8 +267,10 @@ def _get_pass_display_name(pass_obj) -> str:
 def _incremental_flush_html():
     """Write the current HTML report incrementally.
 
-    Uses _section_cache to avoid re-rendering previously completed sections.
-    Total cost is O(n) instead of O(n^2) for full rewrites.
+    Passes ``_section_cache`` to ``generate_html`` so that already-rendered
+    pass sections (and their computed diffs) are reused instead of being
+    recomputed on every flush.  Only newly recorded passes incur the diff
+    cost, keeping the total tracing overhead O(n) rather than O(n^2).
     """
     if not _records or not _run_dir:
         return
@@ -251,7 +278,7 @@ def _incremental_flush_html():
     from .html import generate_html
 
     html_path = os.path.join(_run_dir, "report.html")
-    generate_html(_records, html_path)
+    generate_html(_records, html_path, section_cache=_section_cache)
     _update_html_symlink(html_path)
 
 
@@ -392,7 +419,10 @@ def _discover_passes(phase_func) -> list[str]:
     seen_calls: set = set()
 
     class _PassVisitor(ast.NodeVisitor):
+        """AST visitor that collects pass names from function call sites."""
+
         def visit_Call(self, node):
+            """Record any pass-like call found at this node (and nested callels)."""
             func = node.func
             found_in_nested = False
             while isinstance(func, ast.Call):
@@ -423,6 +453,7 @@ def _discover_passes_recursive(phase_func) -> list[str]:
     seen_calls: set = set()
 
     def _visit(func):
+        """Recively visit ``func`` and its locally-referenced callees, collecting pass names."""
         func_id = id(func)
         if func_id in visited:
             return
@@ -446,7 +477,10 @@ def _discover_passes_recursive(phase_func) -> list[str]:
             local_ns.update(func.__globals__)
 
         class _PassVisitor(ast.NodeVisitor):
+            """AST visitor that collects pass names and follows local helper calls."""
+
             def visit_Call(self, node):
+                """Record pass-like calls and recurse into locally-defined helpers."""
                 call_func = node.func
 
                 found_in_nested = False
@@ -516,6 +550,7 @@ def _discover_phases(lower_func) -> list:
         ]
 
     def _src_line(f):
+        """Return the source line number of ``f`` (large sentinel on failure) for stable sorting."""
         try:
             return inspect.getsourcelines(f)[1]
         except (OSError, TypeError):
@@ -536,14 +571,18 @@ def _wrap_phase(original_func, phase_index, total_phases):
 
     @functools.wraps(original_func)
     def wrapper(*args, **kwargs):
+        """Set per-phase tracing context, run the phase, then flush the HTML report."""
         global _run_counter, _current_phase, _auto_flush, _run_dir
 
         with _lock:
             if phase_index == 1:
                 _run_counter += 1
-                if _run_counter == 1:
-                    reset()
-                else:
+                # Don't reset() on the first run: pre-pipeline passes may have
+                # already been recorded under _UNSCOPED_PHASE, and resetting
+                # would wipe them and break global pass numbering. State is
+                # already clean (module load / disable()); subsequent runs
+                # just get a fresh _run_dir below.
+                if _run_counter > 1:
                     _run_dir = None
 
             run_prefix = f"run{_run_counter}_" if _run_counter > 1 else ""
@@ -593,9 +632,12 @@ def _traced_pipeline_lower(self, mod, target):
 
     with _lock:
         _run_counter += 1
-        if _run_counter == 1:
-            reset()
-        else:
+        # Don't reset() on the first run: pre-pipeline passes may have
+        # already been recorded under _UNSCOPED_PHASE, and resetting would
+        # wipe them and break global pass numbering. State is already clean
+        # (module load / disable()); subsequent runs just get a fresh
+        # _run_dir below.
+        if _run_counter > 1:
             _run_dir = None
 
         run_prefix = f"run{_run_counter}_" if _run_counter > 1 else ""
@@ -626,19 +668,6 @@ def _traced_pipeline_lower(self, mod, target):
     print(f"  [lower_trace] run {_run_counter} ({phase_name}) complete: {len(_records)} total records")
 
     return result
-
-
-class _CodegenSourceProxy:
-    """Proxy returned when codegen is skipped (source loaded from file)."""
-
-    def __init__(self, source: str):
-        self._source = source
-
-    def inspect_source(self) -> str:
-        return self._source
-
-    def get_source(self) -> str:
-        return self._source
 
 
 def _wrap_codegen_ffi(original_build):
@@ -682,6 +711,7 @@ def _wrap_codegen_ffi(original_build):
 
     @functools.wraps(original_build)
     def wrapper(*args, **kwargs):
+        """Run codegen under the trace: capture TIR-before/C++-after and emit a STATUS_CODEGEN record."""
         global _pass_index, _current_phase
 
         if not _is_trace_enabled():
@@ -830,8 +860,14 @@ def _wrap_codegen_ffi(original_build):
 
             print_diff(before_text, after_text, "codegen (TIR before)", "codegen (C++ after)")
 
-        if patched_text is not None:
-            return _CodegenSourceProxy(patched_text)
+        if patched_text is not None and patched_text.rstrip() != codegen_text.rstrip():
+            print(
+                f"  {_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_codegen: NOTE — user edits in "
+                f"{codegen_out_path} are recorded in the trace for diff viewing, but were NOT "
+                f"recompiled (the codegen FFI builds from TIR, not from C++ source). The compiled "
+                f"artifact reflects the unpatched codegen output.{_ANSI_RESET}"
+            )
+
         return result
 
     return wrapper
@@ -879,6 +915,16 @@ def enable(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
     if codegen_output is not _UNSET:
         _codegen_output_path_override = codegen_output if codegen_output is None else str(codegen_output)
 
+    # Explicitly disabling (mode=None or an off-value): remove any hooks a
+    # prior enable() may have installed so global state is left unchanged,
+    # then re-assert the None override so a stale TL_LOWER_TRACE env var
+    # cannot silently re-enable tracing. The no-args case (mode unset) still
+    # falls through to install hooks and resolve the mode at runtime.
+    if mode is not _UNSET and _mode_override is None:
+        disable()
+        _mode_override = None
+        return
+
     from tvm.ir.transform import Pass
 
     global _original_pass_call, _original_pipeline_lower, _atexit_registered, _legacy_patched
@@ -897,8 +943,8 @@ def enable(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
                     wrapped._original_ffi_name = ffi_name
                     _original_codegen_ffis[ffi_name] = orig
                     tvm.ffi.register_global_func(ffi_name, wrapped, override=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[lower_trace] WARNING: could not wrap codegen FFI {ffi_name}: {exc}")
 
     _register_atexit()
 
@@ -932,16 +978,24 @@ def enable(*, mode=_UNSET, trace_dir=_UNSET, codegen_output=_UNSET):
     phase_funcs = _discover_phases(lower_func)
     for i, phase_func in enumerate(phase_funcs):
         wrapped = _wrap_phase(phase_func, i + 1, len(phase_funcs))
-        setattr(patch_mod, phase_func.__name__, wrapped)
+        name = phase_func.__name__
+
+        # Save originals on every target before overwriting so disable() can
+        # restore them cleanly (CWE: tracing must be fully reversible).
+        _legacy_phase_originals.append((patch_mod, name, getattr(patch_mod, name, _MISSING), False))
+        setattr(patch_mod, name, wrapped)
         try:
             from tilelang.engine import phase as phase_module
 
-            if hasattr(phase_module, phase_func.__name__):
-                setattr(phase_module, phase_func.__name__, wrapped)
+            if hasattr(phase_module, name):
+                _legacy_phase_originals.append((phase_module, name, getattr(phase_module, name, _MISSING), False))
+                setattr(phase_module, name, wrapped)
         except ImportError:
             pass
-        if phase_func.__name__ in getattr(lower_func, "__globals__", {}):
-            lower_func.__globals__[phase_func.__name__] = wrapped
+        glbls = getattr(lower_func, "__globals__", None)
+        if glbls is not None and name in glbls:
+            _legacy_phase_originals.append((glbls, name, glbls[name], True))
+            glbls[name] = wrapped
 
     _legacy_patched = True
     print(f"[lower_trace] IR pass tracing enabled (phase-based architecture, {len(phase_funcs)} phases). Set TL_LOWER_TRACE=1 to enable.")
@@ -955,7 +1009,7 @@ def _final_report():
         from .html import generate_html
 
         html_path = os.path.join(_run_dir, "report.html")
-        generate_html(_records, html_path)
+        generate_html(_records, html_path, section_cache=_section_cache)
         _update_html_symlink(html_path)
         print(f"  [lower_trace] Final HTML report: {_ANSI_BLUE}{os.path.join(_script_dir, 'report.html')}{_ANSI_RESET}")
     except Exception as exc:
@@ -966,6 +1020,7 @@ def disable():
     """Remove the pass tracing hook and restore original behavior."""
     global _original_pass_call, _original_pipeline_lower, _atexit_registered, _run_counter, _legacy_patched
     global _mode_override, _trace_dir_override, _codegen_output_path_override, _script_dir, _run_dir
+    global _legacy_phase_originals
 
     if _original_pass_call is not None:
         from tvm.ir.transform import Pass
@@ -980,6 +1035,22 @@ def disable():
 
     _original_pipeline_lower = None
     _legacy_patched = False
+
+    # Restore the phase callables that the legacy fallback path overwrote in
+    # patch_mod / tilelang.engine.phase / lower_func.__globals__.
+    for target, name, original, is_dict in _legacy_phase_originals:
+        with contextlib.suppress(Exception):
+            if original is _MISSING:
+                if is_dict:
+                    del target[name]  # type: ignore[operator]
+                else:
+                    delattr(target, name)
+            else:
+                if is_dict:
+                    target[name] = original  # type: ignore[index]
+                else:
+                    setattr(target, name, original)
+    _legacy_phase_originals = []
 
     import tvm.ffi
 
@@ -1019,7 +1090,7 @@ def reset():
     """
     global _records, _section_cache, _current_phase, _pass_index, _auto_flush
     _records = []
-    _section_cache = []
+    _section_cache = {}
     _current_phase = None
     _pass_index = 0
     _auto_flush = False

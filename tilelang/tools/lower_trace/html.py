@@ -2,10 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 from .core import LowerRecord, STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED, STATUS_CODEGEN
 from .diff import _esc, _make_diff_html
+
+
+def _js_str(text: str) -> str:
+    """Render a value as a JS string literal safe for an inline HTML event handler.
+
+    ``json.dumps`` produces a double-quoted JS string (escaping quotes,
+    backslashes, newlines); ``_esc`` then neutralises the double quotes so the
+    result can be embedded inside a double-quoted HTML attribute.  The HTML
+    parser decodes ``&quot;`` back to ``"`` before the JS engine runs, so the
+    browser sees a valid string literal even if the name contains quotes or
+    markup.
+    """
+    return _esc(json.dumps(str(text)))
 
 
 _CSS = """
@@ -800,6 +814,14 @@ body {
 _JS = """
 var _activeFilter = null;
 
+function getStoredTheme() {
+    try { return localStorage.getItem('lower-trace-theme'); } catch (e) { return null; }
+}
+
+function setStoredTheme(theme) {
+    try { localStorage.setItem('lower-trace-theme', theme); } catch (e) {}
+}
+
 function toggleTheme() {
     var html = document.documentElement;
     var btn = document.getElementById('theme-btn');
@@ -807,11 +829,11 @@ function toggleTheme() {
     if (html.getAttribute('data-theme') === 'dark') {
         html.removeAttribute('data-theme');
         btn.textContent = '\\u263E Dark';
-        localStorage.setItem('lower-trace-theme', 'light');
+        setStoredTheme('light');
     } else {
         html.setAttribute('data-theme', 'dark');
         btn.textContent = '\\u2600 Light';
-        localStorage.setItem('lower-trace-theme', 'dark');
+        setStoredTheme('dark');
     }
 }
 
@@ -1264,13 +1286,16 @@ function initSidebarResize() {
     var openBtn = document.getElementById('sidebar-open-btn');
     if (!handle) return;
 
-    var sidebar = document.querySelector('.sidebar:not([style*="display: none"])') || document.querySelector('.sidebar');
-    if (!sidebar) return;
+    function getVisibleSidebar() {
+        return document.querySelector('.sidebar:not([style*="display: none"])') || document.querySelector('.sidebar');
+    }
 
+    var sidebar = null;
     var dragging = false, startX = 0, startW = 0;
 
     handle.addEventListener('mousedown', function(e) {
-        if (sidebar.classList.contains('collapsed')) return;
+        sidebar = getVisibleSidebar();
+        if (!sidebar || sidebar.classList.contains('collapsed')) return;
         dragging = true;
         startX = e.clientX;
         startW = sidebar.offsetWidth;
@@ -1281,7 +1306,7 @@ function initSidebarResize() {
     });
 
     document.addEventListener('mousemove', function(e) {
-        if (!dragging) return;
+        if (!dragging || !sidebar) return;
         var w = Math.max(150, Math.min(600, startW + e.clientX - startX));
         sidebar.style.width = w + 'px';
     });
@@ -1341,7 +1366,7 @@ def render_pass_section(rec: LowerRecord) -> str:
         return (
             f'<div class="pass-section failed-section" id="{sid}">'
             f'<div class="pass-header">'
-            f"<h2>{rec.index:02d}. {rec.name}</h2>"
+            f"<h2>{rec.index:02d}. {_esc(rec.name)}</h2>"
             f"{status_html}"
             f"</div>"
             f"{error_html}"
@@ -1355,7 +1380,7 @@ def render_pass_section(rec: LowerRecord) -> str:
         return (
             f'<div class="pass-section skipped-section" id="{sid}">'
             f'<div class="pass-header">'
-            f"<h2>{rec.index:02d}. {rec.name}</h2>"
+            f"<h2>{rec.index:02d}. {_esc(rec.name)}</h2>"
             f"{status_html}"
             f"</div>"
             f'<p class="noop-msg">This pass did not run (a previous pass failed).</p>'
@@ -1388,7 +1413,7 @@ def render_pass_section(rec: LowerRecord) -> str:
                 f'<div class="pass-section codegen-section" id="{sid}">'
                 f'<div class="pass-header collapsible" onclick="toggleCollapse(this)">'
                 f'<span class="pass-toggle"></span>'
-                f"<h2>{rec.index:02d}. {rec.name}</h2>"
+                f"<h2>{rec.index:02d}. {_esc(rec.name)}</h2>"
                 f"{status_html}"
                 f"</div>"
                 f"{diff_content}"
@@ -1412,7 +1437,7 @@ def render_pass_section(rec: LowerRecord) -> str:
             f'<div class="pass-section" id="{sid}">'
             f'<div class="pass-header collapsible" onclick="toggleCollapse(this)">'
             f'<span class="pass-toggle"></span>'
-            f"<h2>{rec.index:02d}. {rec.name}</h2>"
+            f"<h2>{rec.index:02d}. {_esc(rec.name)}</h2>"
             f"{status_html}"
             f"</div>"
             f"{diff_content}"
@@ -1437,7 +1462,7 @@ def render_pass_section(rec: LowerRecord) -> str:
         return (
             f'<div class="pass-section" id="{sid}">'
             f'<div class="pass-header">'
-            f"<h2>{rec.index:02d}. {rec.name}</h2>"
+            f"<h2>{rec.index:02d}. {_esc(rec.name)}</h2>"
             f"{status_html}"
             f"</div>"
             f"{diff_content}"
@@ -1446,8 +1471,16 @@ def render_pass_section(rec: LowerRecord) -> str:
         )
 
 
-def generate_html(records: list[LowerRecord], output_path: str):
-    """Generate a self-contained HTML file with pass trace visualization."""
+def generate_html(records: list[LowerRecord], output_path: str, section_cache: dict | None = None):
+    """Generate a self-contained HTML file with pass trace visualization.
+
+    ``section_cache`` (keyed by ``(phase, index)``) memoizes the expensive
+    per-pass section rendering (which includes the IR diff).  When supplied by
+    the incremental flush path, previously rendered sections are reused so the
+    diff is computed at most once per record, keeping total cost O(n).
+    """
+    if section_cache is None:
+        section_cache = {}
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
     phases: dict = {}
@@ -1483,7 +1516,9 @@ def generate_html(records: list[LowerRecord], output_path: str):
         n_skipped = sum(1 for r in phase_records if r.status == STATUS_SKIPPED)
         n_noop = n_completed - n_changed
 
-        phase_tabs_html.append(f'<div class="phase-tab{active_cls}" onclick="showPhase(this, \'{phase_name}\')">{pretty_phase}</div>')
+        phase_tabs_html.append(
+            f'<div class="phase-tab{active_cls}" onclick="showPhase(this, {_js_str(phase_name)})">{_esc(pretty_phase)}</div>'
+        )
 
         failed_badge = ""
         skipped_badge = ""
@@ -1532,7 +1567,7 @@ def generate_html(records: list[LowerRecord], output_path: str):
                 stats_html = (
                     f'<span class="pass-stats">'
                     f'<span class="st-add">+{rec.add_lines}</span> '
-                    f'<span class="st-del">−{rec.del_lines}</span>'
+                    f'<span class="st-del">&minus;{rec.del_lines}</span>'
                     f"</span>"
                 )
             elif rec.status == STATUS_FAILED:
@@ -1540,12 +1575,12 @@ def generate_html(records: list[LowerRecord], output_path: str):
             elif rec.status == STATUS_SKIPPED:
                 stats_html = '<span class="pass-stats" style="color:#94a3b8">—</span>'
             links.append(
-                f'<a class="pass-link" data-phase="{rec.phase}" data-target="{sid}" '
+                f'<a class="pass-link" data-phase="{_esc(rec.phase)}" data-target="{_esc(sid)}" '
                 f'data-status="{status_attr}" '
-                f"onclick=\"showPass(this, '{sid}')\">"
+                f'onclick="showPass(this, {_js_str(sid)})">'
                 f'<span class="pass-idx">{rec.index:02d}</span>'
                 f'<span class="pass-dot {dot_cls}"></span>'
-                f'<span class="pass-label">{rec.name}</span>'
+                f'<span class="pass-label">{_esc(rec.name)}</span>'
                 f"{stats_html}"
                 f"</a>"
             )
@@ -1556,19 +1591,24 @@ def generate_html(records: list[LowerRecord], output_path: str):
         )
 
         for rec in phase_records:
-            sections_html.append(render_pass_section(rec))
+            key = (rec.phase, rec.index)
+            rendered = section_cache.get(key)
+            if rendered is None:
+                rendered = render_pass_section(rec)
+                section_cache[key] = rendered
+            sections_html.append(rendered)
 
     auto_show_js = ""
     if records:
         first_sid = f"sec-{records[0].phase}-{records[0].index}"
         auto_show_js = (
             "document.addEventListener('DOMContentLoaded', function() {\n"
-            f"  var firstSid = '{first_sid}';\n"
+            f"  var firstSid = {json.dumps(first_sid)};\n"
             "  var el = document.querySelector('[data-target=\"' + firstSid + '\"]');\n"
             "  if (el) showPass(el, firstSid);\n"
             "  if (typeof initSidebarResize === 'function') initSidebarResize();\n"
             "  _alignStatus = document.getElementById('align-status');\n"
-            "  var _saved = localStorage.getItem('lower-trace-theme');\n"
+            "  var _saved = getStoredTheme();\n"
             "  if (_saved === 'dark') {\n"
             "    document.documentElement.setAttribute('data-theme', 'dark');\n"
             "    var _tb = document.getElementById('theme-btn');\n"
@@ -1585,8 +1625,9 @@ def generate_html(records: list[LowerRecord], output_path: str):
             "    if (e.key === 'j' || e.key === 'k') {\n"
             "      e.preventDefault();\n"
             "      var idx = -1;\n"
+            "      var currentLink = document.querySelector('.pass-link.active') || activeLink;\n"
             "      for (var i = 0; i < passLinks.length; i++) {\n"
-            "        if (passLinks[i] === activeLink) { idx = i; break; }\n"
+            "        if (passLinks[i] === currentLink) { idx = i; break; }\n"
             "      }\n"
             "      if (e.key === 'j' && idx < passLinks.length - 1) idx++;\n"
             "      else if (e.key === 'k' && idx > 0) idx--;\n"

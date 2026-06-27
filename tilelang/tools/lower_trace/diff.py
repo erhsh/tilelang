@@ -197,7 +197,7 @@ def _make_diff_html(before_text: str, after_text: str, context: int = 3) -> str:
 
     for tag, i1, i2, j1, j2 in opcodes:
         if tag == "equal":
-            for i, j in zip(range(i1, i2), range(j1, j2)):
+            for i, j in zip(range(i1, i2), range(j1, j2), strict=True):
                 collapsed = before_collapse[i]
                 hidden_attr = ' class="row-hidden" data-collapse="1"' if collapsed else ""
                 ln_l = f'<td class="ln ln-eq" data-side="l" data-idx="{i}">{i + 1}</td>'
