@@ -764,12 +764,12 @@ def _wrap_codegen_ffi(original_build):
                     if os.path.isfile(codegen_out_path):
                         shutil.copyfile(codegen_out_path, codegen_out_path + ".bak")
                         print(
-                            f"  {_ANSI_BOLD}{_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_codegen: INIT-BACKUP — {codegen_out_path} existed without baseline, backed up to {codegen_out_path}.bak{_ANSI_RESET}"
+                            f"  [lower_trace] codegen/{idx:02d}_codegen: INIT-BACKUP — {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}{_ANSI_RESET} existed without baseline, backed up to {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}.bak{_ANSI_RESET}"
                         )
                     with open(original_path, "w") as _f:
                         _f.write(codegen_text)
                     shutil.copyfile(original_path, codegen_out_path)
-                    print(f"  {_ANSI_GREEN}[lower_trace] codegen source initialized at: {codegen_out_path}{_ANSI_RESET}")
+                    print(f"  [lower_trace] codegen source initialized at: {_ANSI_GREEN}{codegen_out_path}{_ANSI_RESET}")
                 else:
                     with open(original_path) as _f:
                         baseline_text = _f.read()
@@ -791,7 +791,7 @@ def _wrap_codegen_ffi(original_build):
                     elif user_edited and not codegen_changed:
                         patched_text = working_text
                         print(
-                            f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{idx:02d}_codegen: PATCHED from {codegen_out_path}{_ANSI_RESET}"
+                            f"  [lower_trace] codegen/{idx:02d}_codegen: PATCHED from {_ANSI_BOLD}{_ANSI_GREEN}{codegen_out_path}{_ANSI_RESET}"
                         )
                     else:
                         if working_text.rstrip() == codegen_text.rstrip():
@@ -809,10 +809,10 @@ def _wrap_codegen_ffi(original_build):
                             with open(codegen_out_path, "w") as _f:
                                 _f.write(codegen_text)
                             print(
-                                f"  {_ANSI_BOLD}{_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_codegen: CONFLICT "
-                                f"— {codegen_out_path} had user edits AND codegen changed; "
-                                f"backed up to {codegen_out_path}.bak / {original_path}.bak, "
-                                f"regenerated from new codegen.{_ANSI_RESET}"
+                                f"  [lower_trace] codegen/{idx:02d}_codegen: CONFLICT "
+                                f"— {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}{_ANSI_RESET} had user edits AND codegen changed; "
+                                f"backed up to {_ANSI_BOLD}{_ANSI_YELLOW}{codegen_out_path}.bak / {original_path}.bak{_ANSI_RESET}, "
+                                f"regenerated from new codegen."
                             )
                             patched_text = None
             except Exception as _exc:
@@ -862,10 +862,10 @@ def _wrap_codegen_ffi(original_build):
 
         if patched_text is not None and patched_text.rstrip() != codegen_text.rstrip():
             print(
-                f"  {_ANSI_YELLOW}[lower_trace] codegen/{idx:02d}_codegen: NOTE — user edits in "
-                f"{codegen_out_path} are recorded in the trace for diff viewing, but were NOT "
+                f"  [lower_trace] codegen/{idx:02d}_codegen: NOTE — user edits in "
+                f"{_ANSI_YELLOW}{codegen_out_path}{_ANSI_RESET} are recorded in the trace for diff viewing, but were NOT "
                 f"recompiled (the codegen FFI builds from TIR, not from C++ source). The compiled "
-                f"artifact reflects the unpatched codegen output.{_ANSI_RESET}"
+                f"artifact reflects the unpatched codegen output."
             )
 
         return result
