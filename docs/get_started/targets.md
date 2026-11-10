@@ -18,6 +18,7 @@ dictionary when you need options such as GPU architecture or CPU model. The most
 | `hip` | AMD GPUs via ROCm. Use a config dict for options such as `{"kind": "hip", "mcpu": "gfx90a"}`. |
 | `metal` | Apple Silicon GPUs (arm64 Macs). |
 | `ascend` | Huawei Ascend NPUs. Use `execution_backend="pto"` to select PTO code generation. |
+| `pto` | Ascend PTO target shorthand; `execution_backend="auto"` selects the PTO execution adapter. |
 | `llvm` | CPU execution. Use a config dict for options such as `{"kind": "llvm", "mtriple": "x86_64-linux-gnu"}`. |
 | `webgpu` | Browser / WebGPU runtimes. |
 | `c` | Emit plain C source for inspection or custom toolchains. |
@@ -70,8 +71,10 @@ export TILELANG_EXECUTION_BACKEND=pto
 ```
 
 This is equivalent to passing `target="ascend", execution_backend="pto"` to
-`tilelang.compile` or `@tilelang.jit`. Omitting the execution backend, or using
-`execution_backend="auto"`, keeps the default AscendC code generator.
+`tilelang.compile` or `@tilelang.jit`. With no execution-backend override in the
+API or environment, a plain Ascend target uses AscendC. Explicit
+`execution_backend="auto"` follows the target variant's default: AscendC for
+`target="ascend"`, or PTO for `target="pto"`.
 
 For target options, use a JSON object string. This is useful in scripts that rely on the default target through
 `tilelang.compile(..., target=None)`, `@tilelang.jit`, or autotuning:
