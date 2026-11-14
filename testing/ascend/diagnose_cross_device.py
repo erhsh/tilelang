@@ -55,6 +55,8 @@ def environment():
         components[str(driver)] = str(error)
     return {
         "pid": os.getpid(),
+        "home": str(Path.home()),
+        "uid": os.getuid(),
         "python": sys.version,
         "executable": sys.executable,
         "torch": getattr(torch, "__version__", None),
@@ -70,6 +72,10 @@ def environment():
                 "ASCEND_RT_VISIBLE_DEVICES",
                 "ASCEND_VISIBLE_DEVICES",
                 "ASCEND_LAUNCH_BLOCKING",
+                "ASCEND_PROCESS_LOG_PATH",
+                "ASCEND_SLOG_PRINT_TO_STDOUT",
+                "ASCEND_GLOBAL_LOG_LEVEL",
+                "ASCEND_MODULE_LOG_LEVEL",
                 "LD_LIBRARY_PATH",
                 "PYTHONPATH",
             )
@@ -80,40 +86,79 @@ def environment():
 
 
 def collect_plogs(directory, probes):
-    if not probes:
-        return
     pids = {probe["pid"] for probe in probes}
-    started = min(probe["time"] for probe in probes)
+    started = min((probe["time"] for probe in probes), default=None)
     log_root = Path.home() / "ascend/log"
-    roots = {log_root / "plog", log_root / "debug/plog", log_root / "run/plog"}
+    roots = {directory / "runtime-logs", log_root / "plog", log_root / "debug/plog", log_root / "run/plog"}
     if os.environ.get("ASCEND_PROCESS_LOG_PATH"):
         roots.add(Path(os.environ["ASCEND_PROCESS_LOG_PATH"]))
     remaining = 20 * 1024 * 1024
     count = 0
     seen = set()
-    for root in roots:
+    report = {"home": str(Path.home()), "uid": os.getuid(), "pids": sorted(pids), "started": started, "roots": []}
+    for root in sorted(roots):
+        entry = {"path": str(root), "status": "directory", "counts": {}, "files": [], "files_omitted": 0}
+        report["roots"].append(entry)
         try:
-            for path in root.rglob("*.log"):
-                if remaining <= 0:
-                    return
-                resolved = path.resolve()
-                if resolved in seen:
-                    continue
-                seen.add(resolved)
-                if path.stat().st_mtime < started or not any(re.search(rf"(?<!\d){pid}(?!\d)", path.name) for pid in pids):
-                    continue
-                # Copy only this run's process logs, capped at 2 MiB per file.
-                size = min(path.stat().st_size, 2 * 1024 * 1024, remaining)
-                with path.open("rb") as source:
-                    source.seek(-size, os.SEEK_END)
-                    data = source.read(size)
-                target = directory / "plog"
-                target.mkdir(exist_ok=True)
-                (target / f"{count}-{path.name}").write_bytes(data)
-                remaining -= len(data)
-                count += 1
+            root.stat()
+            if not root.is_dir():
+                entry["status"] = "not_directory"
+                continue
+            if not probes:
+                entry["status"] = "no_probes"
+                continue
+            scan_errors = []
+            paths = (
+                Path(parent) / name
+                for parent, _, names in os.walk(root, onerror=lambda error, errors=scan_errors: errors.append(str(error)))
+                for name in names
+                if name.endswith(".log")
+            )
+            for path in paths:
+                record = {"path": str(path)}
+                try:
+                    resolved = path.resolve()
+                    stat = path.stat()
+                    record.update(size=stat.st_size, mtime=stat.st_mtime)
+                    if resolved in seen:
+                        record["status"] = "duplicate"
+                    elif stat.st_mtime < started:
+                        record["status"] = "before_probe"
+                    elif not any(re.search(rf"(?<!\d){pid}(?!\d)", path.name) for pid in pids):
+                        record["status"] = "pid_mismatch"
+                    elif remaining <= 0:
+                        record["status"] = "byte_limit"
+                    else:
+                        # Copy only this run's process logs, capped at 2 MiB per file.
+                        size = min(stat.st_size, 2 * 1024 * 1024, remaining)
+                        with path.open("rb") as source:
+                            source.seek(-size, os.SEEK_END)
+                            data = source.read(size)
+                        target = directory / "plog"
+                        target.mkdir(exist_ok=True)
+                        destination = target / f"{count}-{path.name}"
+                        destination.write_bytes(data)
+                        record.update(status="copied", copied_bytes=len(data), destination=str(destination))
+                        remaining -= len(data)
+                        count += 1
+                    seen.add(resolved)
+                except OSError as error:
+                    record.update(status="error", error=str(error))
+                status = record["status"]
+                entry["counts"][status] = entry["counts"].get(status, 0) + 1
+                if len(entry["files"]) < 100:
+                    entry["files"].append(record)
+                else:
+                    entry["files_omitted"] += 1
+            if scan_errors:
+                entry.update(status="error", scan_errors=scan_errors[:100])
+        except FileNotFoundError:
+            entry["status"] = "missing"
         except OSError as error:
+            entry.update(status="error", error=str(error))
             print(f"Could not collect plog from {root}: {error}", file=sys.stderr)
+    report.update(copied_files=count, copied_bytes=20 * 1024 * 1024 - remaining)
+    return report
 
 
 def summarize(directory):
@@ -135,10 +180,21 @@ def summarize(directory):
             if record.get("traceback"):
                 print(f"Original cross-device exception ({path.name}):\n{record['traceback']}", flush=True)
     (directory / "summary.json").write_text(json.dumps(probes, indent=2))
-    collect_plogs(directory, probes)
+    plogs = collect_plogs(directory, probes)
+    (directory / "plog-collection.json").write_text(json.dumps(plogs, indent=2))
+    print(f"CANN log collection: {plogs['copied_files']} files, {plogs['copied_bytes']} bytes", flush=True)
+    for root in plogs["roots"]:
+        print(f"  {root['path']}: {root['status']}, {root['counts']}", flush=True)
     lines = ["### Ascend cross-device diagnostics", "", "| Worker / PID | Last recorded stage | Devices |", "| --- | --- | --- |", *rows]
     if not rows:
         lines.extend(["", "No cross-device probe records were produced; inspect the original unit-test log."])
+    lines.extend(
+        [
+            "",
+            f"CANN logs collected: {plogs['copied_files']} files ({plogs['copied_bytes']} bytes). "
+            "See `plog-collection.json` for directory status and filtering reasons.",
+        ]
+    )
     lines.extend(["", "Passive collection only; no additional device operations or tests were run."])
     summary = "\n".join(lines) + "\n"
     (directory / "summary.md").write_text(summary)

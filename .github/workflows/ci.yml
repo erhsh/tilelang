@@ -596,6 +596,13 @@ jobs:
           TILELANG_ASCEND_DIAGNOSTICS_DIR: ${{ matrix.backend.name == 'AscendC' && format('{0}/ascend-diagnostics/original-probes', runner.temp) || '' }}
         run: |
           source .venv/bin/activate
+          if [[ -n "${TILELANG_ASCEND_DIAGNOSTICS_DIR}" ]]; then
+            export ASCEND_PROCESS_LOG_PATH="${RUNNER_TEMP}/ascend-diagnostics/runtime-logs"
+            export ASCEND_SLOG_PRINT_TO_STDOUT=0
+            export ASCEND_GLOBAL_LOG_LEVEL=3
+            unset ASCEND_MODULE_LOG_LEVEL
+            mkdir -p "${ASCEND_PROCESS_LOG_PATH}" || echo "::warning::Could not create the CANN log directory"
+          fi
           python -m pytest --verbose --durations=0 --maxfail=3 -n 32 -m "${TEST_MARKERS}" testing/ascend
 
       - name: Summarize Ascend cross-device diagnostics
@@ -611,7 +618,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ascend-cross-device-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ascend-diagnostics
+          # Upload only the bounded copies, not every worker's raw runtime logs.
+          path: |
+            ${{ runner.temp }}/ascend-diagnostics
+            !${{ runner.temp }}/ascend-diagnostics/runtime-logs/**
           retention-days: 7
           if-no-files-found: warn
 
