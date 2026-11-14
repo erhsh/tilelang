@@ -532,8 +532,10 @@ jobs:
       - name: Set up environment and build Ascend
         id: ascend-build
         shell: bash
+        env:
+          ASCEND_CI_BACKEND: ${{ matrix.backend.name }}
         run: |
-          # Keep the runner's preinstalled Torch/Torch-NPU stack.
+          # Keep the image's Torch; test the fixed Torch-NPU wheel for AscendC.
           CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
           for CANN_SET_ENV in \
             "${ASCEND_HOME_PATH:-}/set_env.sh" \
@@ -557,13 +559,25 @@ jobs:
 
           uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
           source .venv/bin/activate
+          if [[ "${ASCEND_CI_BACKEND}" == "AscendC" ]]; then
+            python -m pip install --ignore-installed --no-deps \
+              'https://files.pythonhosted.org/packages/51/b6/ff24b8a1414dc9faf3fb73799d104e4b107e93f14914bd3fa2565956ddb3/torch_npu-2.10.0.post7-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=c516f27f4896301b70dad994ae5a67d8ba2423cfd62a4d44701592601977506c'
+          fi
           export PIP_CONSTRAINT="${RUNNER_TEMP}/ascend-torch-constraints.txt"
           python - <<'PY'
           import os
+          from pathlib import Path
+          import sys
           from importlib.metadata import version
           import torch
           import torch_npu
 
+          print(f"Torch-NPU: {torch_npu.__version__}, git={torch_npu.version.git_version}, path={torch_npu.__file__}")
+          if os.environ["ASCEND_CI_BACKEND"] == "AscendC":
+              assert torch.__version__ == "2.10.0+cpu"
+              assert torch_npu.__version__ == "2.10.0.post7"
+              assert torch_npu.version.git_version == "3363ea59d49f3e08cfd8d4a1f532b756ccda0682"
+              assert Path(torch_npu.__file__).is_relative_to(Path(sys.prefix)), "Torch-NPU must load from the job venv"
           assert torch.npu.is_available(), "Ascend CI requires an available NPU"
           with open(os.environ["PIP_CONSTRAINT"], "w") as constraints:
               for package in ("torch", "torch_npu"):
@@ -597,7 +611,7 @@ jobs:
         run: |
           source .venv/bin/activate
           if [[ -n "${TILELANG_ASCEND_DIAGNOSTICS_DIR}" ]]; then
-            export ASCEND_PROCESS_LOG_PATH="${RUNNER_TEMP}/ascend-diagnostics/runtime-logs"
+            export ASCEND_PROCESS_LOG_PATH="${RUNNER_TEMP}/ascend-runtime-logs"
             export ASCEND_SLOG_PRINT_TO_STDOUT=0
             export ASCEND_GLOBAL_LOG_LEVEL=3
             unset ASCEND_MODULE_LOG_LEVEL
@@ -618,10 +632,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ascend-cross-device-${{ github.run_id }}-${{ github.run_attempt }}
-          # Upload only the bounded copies, not every worker's raw runtime logs.
-          path: |
-            ${{ runner.temp }}/ascend-diagnostics
-            !${{ runner.temp }}/ascend-diagnostics/runtime-logs/**
+          # Raw runtime logs live outside this directory; upload bounded copies.
+          path: ${{ runner.temp }}/ascend-diagnostics
           retention-days: 7
           if-no-files-found: warn
 

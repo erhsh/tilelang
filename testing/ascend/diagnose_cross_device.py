@@ -89,7 +89,7 @@ def collect_plogs(directory, probes):
     pids = {probe["pid"] for probe in probes}
     started = min((probe["time"] for probe in probes), default=None)
     log_root = Path.home() / "ascend/log"
-    roots = {directory / "runtime-logs", log_root / "plog", log_root / "debug/plog", log_root / "run/plog"}
+    roots = {directory.parent / "ascend-runtime-logs", log_root / "plog", log_root / "debug/plog", log_root / "run/plog"}
     if os.environ.get("ASCEND_PROCESS_LOG_PATH"):
         roots.add(Path(os.environ["ASCEND_PROCESS_LOG_PATH"]))
     remaining = 20 * 1024 * 1024
